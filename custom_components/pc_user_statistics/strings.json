@@ -1,0 +1,66 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure PC User Statistics",
+        "description": "Enter InfluxDB details to track power consumption, game time, and costs for the gaming PC.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "database": "Database",
+          "username": "Username",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot connect to InfluxDB. Check host, port, and credentials.",
+      "invalid_config": "Invalid configuration. Please check all fields.",
+      "unknown": "Unknown error occurred during setup."
+    },
+    "abort": {
+      "already_configured": "This integration is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Users",
+        "description": "Edit which users are tracked and how sensor states map to user IDs.\n\n**Tracked users**: comma-separated list, e.g. `flemming, lukas, sebastian`\n\n**User mappings**: comma-separated key=value pairs, e.g. `konge=flemming, lukas=lukas, sebas=sebastian`",
+        "data": {
+          "tracked_users": "Tracked users",
+          "user_mappings": "User mappings (sensor state=user id)"
+        }
+      }
+    },
+    "error": {
+      "no_users": "At least one tracked user is required.",
+      "mapping_user_not_tracked": "All mapped user IDs must exist in the tracked users list."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "current_user": {
+        "name": "Current user"
+      },
+      "current_session_time": {
+        "name": "Current session time"
+      },
+      "current_session_energy": {
+        "name": "Current session energy"
+      },
+      "current_session_cost": {
+        "name": "Current session cost"
+      },
+      "monthly_time": {
+        "name": "Monthly time"
+      },
+      "monthly_energy": {
+        "name": "Monthly energy"
+      },
+      "monthly_cost": {
+        "name": "Monthly cost"
+      }
+    }
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Konfigurer PC Bruger Statistik",
+        "description": "Indtast InfluxDB detaljer for at spore strømforbrug, spilletid og omkostninger for gaming-PC'en.",
+        "data": {
+          "host": "Vært",
+          "port": "Port",
+          "database": "Database",
+          "username": "Brugernavn",
+          "password": "Adgangskode"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Kan ikke oprette forbindelse til InfluxDB. Kontroller vært, port og legitimationsoplysninger.",
+      "invalid_config": "Ugyldig konfiguration. Kontroller alle felter.",
+      "unknown": "Ukendt fejl opstod under opsætning."
+    },
+    "abort": {
+      "already_configured": "Denne integration er allerede konfigureret."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Konfigurer brugere",
+        "description": "Rediger hvilke brugere der spores og hvordan sensortilstande mappes til bruger-ID'er.\n\n**Sporede brugere**: kommasepareret liste, f.eks. `flemming, lukas, sebastian`\n\n**Brugermappings**: kommaseparerede nøgle=værdi par, f.eks. `konge=flemming, lukas=lukas, sebas=sebastian`",
+        "data": {
+          "tracked_users": "Sporede brugere",
+          "user_mappings": "Brugermappings (sensortilstand=bruger-id)"
+        }
+      }
+    },
+    "error": {
+      "no_users": "Mindst én sporet bruger er påkrævet.",
+      "mapping_user_not_tracked": "Alle mappede bruger-ID'er skal findes i listen over sporede brugere."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "current_user": {
+        "name": "Nuværende bruger"
+      },
+      "current_session_time": {
+        "name": "Nuværende sessionstid"
+      },
+      "current_session_energy": {
+        "name": "Nuværende sessionsenergi"
+      },
+      "current_session_cost": {
+        "name": "Nuværende sessionsomkostning"
+      },
+      "monthly_time": {
+        "name": "Månedlig tid"
+      },
+      "monthly_energy": {
+        "name": "Månedlig energi"
+      },
+      "monthly_cost": {
+        "name": "Månedlig omkostning"
+      }
+    }
+  }
+}

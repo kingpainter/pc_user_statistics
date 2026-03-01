@@ -1,0 +1,18 @@
+# Testing requirements for PC User Statistics integration
+
+# Core dependencies (from manifest.json)
+influxdb==5.3.2
+aiohttp>=3.8.0
+
+# Testing framework
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+pytest-homeassistant-custom-component>=0.13.0
+
+# Mocking and testing utilities
+pytest-mock>=3.11.0
+freezegun>=1.2.0
+
+# Home Assistant core (for testing)
+homeassistant>=2024.1.0
