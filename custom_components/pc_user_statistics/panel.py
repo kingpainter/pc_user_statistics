@@ -1,7 +1,10 @@
 # File Name: panel.py
-# Version: 2.2.0
-# Description: Panel registration for PC User Statistics.
-# Last Updated: March 1, 2026
+# Version: 2.3.3
+# Description: Panel and Lovelace card registration for PC User Statistics.
+#              Registers the sidebar panel (admin only) and the custom Lovelace
+#              cards as static HTTP paths. Cards auto-register in the Lovelace
+#              picker via window.customCards in the JS file itself.
+# Last Updated: March 2, 2026
 
 from __future__ import annotations
 
@@ -16,55 +19,148 @@ from .const import DOMAIN, __version__
 
 _LOGGER = logging.getLogger(__name__)
 
-PANEL_URL       = f"/api/{DOMAIN}-panel"
-PANEL_ICON      = "mdi:controller-classic"
-PANEL_NAME      = "pc-user-statistics-panel"
-PANEL_TITLE     = "PC Statistik"
-PANEL_FOLDER    = "frontend"
-PANEL_FILENAME  = "pc-user-statistics-panel.js"
+PANEL_URL         = f"/api/{DOMAIN}-panel"
+CARDS_URL         = f"/api/{DOMAIN}-cards"
+PANEL_ICON        = "mdi:controller-classic"
+PANEL_NAME        = "pc-user-statistics-panel"
+PANEL_TITLE       = "PC Statistik"
+PANEL_FOLDER      = "frontend"
+PANEL_FILENAME    = "pc-user-statistics-panel.js"
+CARDS_FILENAME    = "pc-user-statistics-cards.js"
 CUSTOM_COMPONENTS = "custom_components"
 
 
 async def async_register_panel(hass: HomeAssistant) -> None:
-    """Register the PC User Statistics sidebar panel."""
+    """Register the sidebar panel and Lovelace card resource."""
 
     # Guard against double registration
     if hass.data[DOMAIN].get("_panel_registered", False):
         _LOGGER.debug("Panel already registered, skipping")
         return
 
-    root_dir      = os.path.join(hass.config.path(CUSTOM_COMPONENTS), DOMAIN)
-    frontend_dir  = os.path.join(root_dir, PANEL_FOLDER)
-    panel_file    = os.path.join(frontend_dir, PANEL_FILENAME)
+    root_dir     = os.path.join(hass.config.path(CUSTOM_COMPONENTS), DOMAIN)
+    frontend_dir = os.path.join(root_dir, PANEL_FOLDER)
+    panel_file   = os.path.join(frontend_dir, PANEL_FILENAME)
+    cards_file   = os.path.join(frontend_dir, CARDS_FILENAME)
 
     # Cache busting based on file mtime
     try:
-        cache_bust = int(os.path.getmtime(panel_file))
+        panel_cache_bust = int(os.path.getmtime(panel_file))
     except OSError:
         _LOGGER.warning("Panel JS file not found: %s", panel_file)
-        cache_bust = 0
+        panel_cache_bust = 0
 
-    # Register static path for the JS file
-    await hass.http.async_register_static_paths([
-        StaticPathConfig(PANEL_URL, panel_file, cache_headers=False),
-    ])
+    try:
+        cards_cache_bust = int(os.path.getmtime(cards_file))
+    except OSError:
+        _LOGGER.warning("Cards JS file not found: %s", cards_file)
+        cards_cache_bust = 0
+
+    # ── Register static HTTP paths ─────────────────────────────────────────
+    static_paths = [StaticPathConfig(PANEL_URL, panel_file, cache_headers=False)]
+    if os.path.exists(cards_file):
+        static_paths.append(StaticPathConfig(CARDS_URL, cards_file, cache_headers=False))
+        _LOGGER.info("Cards static path registered: %s → %s", CARDS_URL, cards_file)
+    else:
+        _LOGGER.warning("Cards JS file not found: %s", cards_file)
+
+    await hass.http.async_register_static_paths(static_paths)
     _LOGGER.info("Panel static path registered: %s → %s", PANEL_URL, panel_file)
 
-    # Register custom sidebar panel
+    # ── Register custom sidebar panel ──────────────────────────────────────
+    # Uses module_url (ES module) — same approach as MieleLogic
     await panel_custom.async_register_panel(
         hass,
         webcomponent_name=PANEL_NAME,
         frontend_url_path=DOMAIN,
-        js_url=f"{PANEL_URL}?v={__version__}&m={cache_bust}",
-        embed_iframe=False,
+        module_url=f"{PANEL_URL}?v={__version__}&m={panel_cache_bust}",
         sidebar_title=PANEL_TITLE,
         sidebar_icon=PANEL_ICON,
-        require_admin=False,
+        require_admin=True,
         config={},
     )
 
     hass.data[DOMAIN]["_panel_registered"] = True
     _LOGGER.info("Panel '%s' registered in sidebar at /%s", PANEL_TITLE, DOMAIN)
+
+    # ── Register cards as Lovelace resource ───────────────────────────────
+    # The JS file registers itself in window.customCards (card picker).
+    # We add it as a Lovelace resource so HA loads the JS on every page.
+    if os.path.exists(cards_file):
+        await _async_register_lovelace_resource(
+            hass,
+            url=f"{CARDS_URL}?v={__version__}&m={cards_cache_bust}",
+            url_base=CARDS_URL,
+        )
+
+
+async def _async_register_lovelace_resource(
+    hass: HomeAssistant,
+    url: str,
+    url_base: str,
+) -> None:
+    """Add or update the cards JS as a Lovelace resource.
+
+    Uses the lovelace integration's resource store directly.
+    Compatible with HA 2024.x+ where LovelaceData no longer has .mode/.resources.
+    """
+    import asyncio
+    try:
+        # In HA 2024.x the lovelace integration exposes resources via
+        # hass.data["lovelace_resources"] (a ResourceStorageCollection).
+        # Fall back to older hass.data["lovelace"].resources for compatibility.
+        resources = hass.data.get("lovelace_resources")
+
+        if resources is None:
+            lovelace = hass.data.get("lovelace")
+            if lovelace is None:
+                _LOGGER.warning(
+                    "Lovelace not available — add '%s' manually as a JS module resource", url
+                )
+                return
+            resources = getattr(lovelace, "resources", None)
+
+        if resources is None:
+            _LOGGER.warning(
+                "Cannot find Lovelace resources store — add '%s' manually as a JS module resource",
+                url,
+            )
+            return
+
+        # Wait until resources collection is loaded (up to 10 seconds)
+        for _ in range(10):
+            if getattr(resources, "loaded", True):
+                break
+            await asyncio.sleep(1)
+
+        existing = [
+            r for r in resources.async_items()
+            if r["url"].startswith(url_base)
+        ]
+
+        if existing:
+            resource = existing[0]
+            if resource["url"] != url:
+                await resources.async_update_item(
+                    resource["id"],
+                    {"res_type": "module", "url": url},
+                )
+                _LOGGER.info("Updated cards Lovelace resource to: %s", url)
+            else:
+                _LOGGER.debug("Cards Lovelace resource already up to date")
+        else:
+            await resources.async_create_item(
+                {"res_type": "module", "url": url}
+            )
+            _LOGGER.info(
+                "Registered cards Lovelace resource: %s — "
+                "custom:pc-user-statistics-user-card and "
+                "custom:pc-user-statistics-tablet-card are now available in the card picker",
+                url,
+            )
+
+    except Exception as err:
+        _LOGGER.error("Failed to register Lovelace resource: %s", err)
 
 
 def async_unregister_panel(hass: HomeAssistant) -> None:
@@ -72,3 +168,22 @@ def async_unregister_panel(hass: HomeAssistant) -> None:
     from homeassistant.components import frontend
     frontend.async_remove_panel(hass, DOMAIN)
     _LOGGER.debug("Panel removed from sidebar")
+
+
+async def async_unregister_cards_resource(hass: HomeAssistant) -> None:
+    """Remove the cards Lovelace resource (called on integration unload)."""
+    try:
+        lovelace = hass.data.get("lovelace")
+        if not lovelace or lovelace.mode != "storage":
+            return
+        if not lovelace.resources.loaded:
+            return
+        existing = [
+            r for r in lovelace.resources.async_items()
+            if r["url"].startswith(CARDS_URL)
+        ]
+        for resource in existing:
+            await lovelace.resources.async_delete_item(resource["id"])
+            _LOGGER.info("Removed cards resource: %s", resource["url"])
+    except Exception as err:
+        _LOGGER.debug("Could not remove cards resource: %s", err)

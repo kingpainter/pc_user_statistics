@@ -95,8 +95,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
         if unload_ok:
-            from .panel import async_unregister_panel
+            from .panel import async_unregister_panel, async_unregister_cards_resource
             async_unregister_panel(hass)
+            await async_unregister_cards_resource(hass)
             hass.data[DOMAIN].pop(entry.entry_id)
             _LOGGER.info("PC User Statistics integration unloaded successfully")
         return unload_ok

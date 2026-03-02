@@ -1,6 +1,6 @@
 // PC User Statistics Panel
-// Version: 2.3.0 — Vanilla JS (no imports)
-// Last Updated: March 1, 2026
+// Version: 2.3.2 — Vanilla JS (no imports)
+// Last Updated: March 2, 2026
 
 class PcUserStatisticsPanel extends HTMLElement {
   constructor() {
@@ -28,6 +28,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._configState  = null; // null | 'saved' | 'error'
     this._tabOrder     = this._loadTabOrder();
     this._dragSrc      = null; // index being dragged
+    this._haUsers      = [];   // [{id, name}] fra config/auth/list
   }
 
   set hass(h) {
@@ -105,6 +106,11 @@ class PcUserStatisticsPanel extends HTMLElement {
   _fmtCost(d)   { return d ? d.toFixed(2).replace(".",",")+" kr"  : "0,00 kr"; }
   _userColor(n) {
     const cols = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6"];
+    // Always use tracked_users index for consistent colors across all panels and cards
+    const users = this._stats?.tracked_users ?? [];
+    const idx = users.indexOf((n || "").toLowerCase());
+    if (idx >= 0) return cols[idx % cols.length];
+    // Fallback: hash (if user not in tracked list)
     let h = 0; for (const c of n||"") h = c.charCodeAt(0)+h*31;
     return cols[Math.abs(h)%cols.length];
   }
@@ -187,6 +193,7 @@ class PcUserStatisticsPanel extends HTMLElement {
         this._render();
         if (el.dataset.tab === "history" && !this._history) this._loadHistory();
         if (el.dataset.tab === "config"  && !this._config)  this._loadConfig();
+        if (el.dataset.tab === "config"  && !this._haUsers.length) this._loadHaUsers();
       });
     });
 
@@ -243,15 +250,15 @@ class PcUserStatisticsPanel extends HTMLElement {
       });
 
       root.querySelector(".add-mapping-btn")?.addEventListener("click", () => {
-        // Add empty row by rebuilding config with extra entry
-        const entries = Object.entries(this._config.user_mappings || {});
-        entries.push(["", ""]);
-        this._config = { ...this._config, user_mappings: Object.fromEntries(entries) };
+        // Add empty row — keep as object (supports new format)
+        const updated = { ...this._config.user_mappings };
+        updated[""] = { user_id: "", ha_user: "" };
+        this._config = { ...this._config, user_mappings: updated };
         this._render();
       });
       root.querySelectorAll(".remove-row-btn").forEach(btn => {
         btn.addEventListener("click", () => {
-          const idx = parseInt(btn.dataset.idx);
+          const idx     = parseInt(btn.dataset.idx);
           const entries = Object.entries(this._config.user_mappings || {});
           entries.splice(idx, 1);
           this._config = { ...this._config, user_mappings: Object.fromEntries(entries) };
@@ -494,14 +501,14 @@ class PcUserStatisticsPanel extends HTMLElement {
 
     return `
       <div class="section-title">Live Session</div>
-      ${cards3}
-      <div class="section-title">Månedlige totaler</div>
-      <div class="monthly-layout">
+      <div class="session-donut-row">
+        ${cards3}
         <div class="donut-wrapper">
           <div class="donut-container">${this._donutSVG(users, monthly)}</div>
         </div>
-        <div class="user-monthly-grid">${userCards}</div>
       </div>
+      <div class="section-title">Månedlige totaler</div>
+      <div class="user-monthly-grid">${userCards}</div>
       <div class="section-title">🏆 Leaderboard</div>
       ${this._leaderboardHTML(users, monthly)}`;
   }
@@ -761,7 +768,7 @@ class PcUserStatisticsPanel extends HTMLElement {
 
   _loadTabOrder() {
     try {
-      const saved = sessionStorage.getItem("pc_stats_tab_order");
+      const saved = localStorage.getItem("pc_stats_tab_order");
       if (saved) {
         const ids = JSON.parse(saved);
         const allIds = PcUserStatisticsPanel.ALL_TABS.map(t => t.id);
@@ -775,7 +782,7 @@ class PcUserStatisticsPanel extends HTMLElement {
   }
 
   _saveTabOrder(order) {
-    try { sessionStorage.setItem("pc_stats_tab_order", JSON.stringify(order)); } catch(e) {}
+    try { localStorage.setItem("pc_stats_tab_order", JSON.stringify(order)); } catch(e) {}
     this._tabOrder = order;
   }
 
@@ -796,6 +803,16 @@ class PcUserStatisticsPanel extends HTMLElement {
       this._config = {};
     }
     this._render();
+  }
+
+  async _loadHaUsers() {
+    try {
+      const result = await this._hass.callWS({ type: "config/auth/list" });
+      this._haUsers = (result || []).map(u => ({ id: u.id, name: u.name }));
+      this._render();
+    } catch (e) {
+      console.warn("[PC Stats] Kunne ikke hente HA brugere:", e);
+    }
   }
 
   async _saveConfig() {
@@ -819,8 +836,12 @@ class PcUserStatisticsPanel extends HTMLElement {
     rows.forEach(row => {
       const sensorState = row.querySelector(".cfg-sensor-state")?.value?.trim();
       const userId      = row.querySelector(".cfg-user-id")?.value?.trim().toLowerCase();
+      const haUser      = row.querySelector(".cfg-ha-user")?.value?.trim() || "";
       if (sensorState && userId) {
-        payload.user_mappings[sensorState] = userId;
+        // Store as object so we can include optional ha_user
+        payload.user_mappings[sensorState] = haUser
+          ? { user_id: userId, ha_user: haUser }
+          : userId; // backwards-compat: plain string if no HA user selected
         if (!payload.tracked_users.includes(userId))
           payload.tracked_users.push(userId);
       } else if (sensorState || userId) {
@@ -857,11 +878,30 @@ class PcUserStatisticsPanel extends HTMLElement {
     const cfg = this._config;
 
     // Build user mapping rows from current config
-    const mappings = Object.entries(cfg.user_mappings || {});
-    // Always show at least 3 rows (or current + 1 empty)
-    while (mappings.length < 3) mappings.push(["", ""]);
+    // user_mappings format supports both legacy string { sensorState: userId }
+    // and new object { sensorState: { user_id, ha_user } }
+    const rawMappings = cfg.user_mappings || {};
+    // Normalize to [{sensorState, userId, haUser}]
+    const mappings = Object.entries(rawMappings).map(([k, v]) => ({
+      sensorState: k,
+      userId:  typeof v === "object" ? (v.user_id || "") : (v || ""),
+      haUser:  typeof v === "object" ? (v.ha_user  || "") : "",
+    }));
+    while (mappings.length < 3) mappings.push({ sensorState: "", userId: "", haUser: "" });
 
-    const mappingRows = mappings.map(([sensorState, userId], i) => `
+    const haUserOptions = [
+      `<option value="">— Vælg HA-bruger (valgfri) —</option>`,
+      ...this._haUsers.map(u =>
+        `<option value="${this._esc(u.id)}">{NAME}</option>`.replace("{NAME}", this._esc(u.name))
+      ),
+    ].join("");
+
+    const mappingRows = mappings.map(({ sensorState, userId, haUser }, i) => {
+      const opts = haUserOptions.replace(
+        `value="${this._esc(haUser)}"`,
+        `value="${this._esc(haUser)}" selected`
+      );
+      return `
       <div class="user-mapping-row">
         <div class="mapping-col">
           <label class="cfg-label">Sensor-tilstand</label>
@@ -874,8 +914,19 @@ class PcUserStatisticsPanel extends HTMLElement {
           <input class="cfg-user-id cfg-input" type="text"
             value="${this._esc(userId)}" placeholder="f.eks. flemming">
         </div>
+        <div class="mapping-arrow">→</div>
+        <div class="mapping-col">
+          <label class="cfg-label">HA Mobil-bruger <span class="cfg-optional">(valgfri)</span></label>
+          <div class="select-wrap">
+            <select class="cfg-ha-user cfg-input cfg-select" data-idx="${i}">
+              ${opts}
+            </select>
+            <span class="select-caret">▾</span>
+          </div>
+        </div>
         <button class="remove-row-btn" data-idx="${i}">✕</button>
-      </div>`).join("");
+      </div>`;
+    }).join("");
 
     const statusBanner = this._configState === "saved"
       ? '<div class="cfg-banner success">✅ Gemt! Home Assistant genindlæser integrationen...</div>'
@@ -1186,23 +1237,17 @@ class PcUserStatisticsPanel extends HTMLElement {
 
   // ── CSS ───────────────────────────────────────────────────────
   _css() {
-    const dark = this._isDark;
-    const bg      = dark ? "#111827" : "var(--primary-background-color,#f9fafb)";
-    const card    = dark ? "#1f2937" : "var(--card-background-color,#ffffff)";
-    const card2   = dark ? "#374151" : "var(--secondary-background-color,#f3f4f6)";
-    const text    = dark ? "#f9fafb" : "var(--primary-text-color,#111827)";
-    const subtext = dark ? "#9ca3af" : "var(--secondary-text-color,#6b7280)";
-    const divider = dark ? "#374151" : "var(--divider)";
-    const accent  = "var(--accent)";
+    // Use HA theme CSS custom properties directly — works with ANY active HA theme.
+    // Shadow DOM inherits custom properties from :root automatically.
     return `
     :host {
-      --bg: ${bg};
-      --card: ${card};
-      --card2: ${card2};
-      --text: ${text};
-      --subtext: ${subtext};
-      --divider: ${divider};
-      --accent: ${accent};
+      --bg:      var(--primary-background-color, #111827);
+      --card:    var(--card-background-color, #1f2937);
+      --card2:   var(--secondary-background-color, #374151);
+      --text:    var(--primary-text-color, #f9fafb);
+      --subtext: var(--secondary-text-color, #9ca3af);
+      --divider: var(--divider-color, #374151);
+      --accent:  var(--accent-color, var(--primary-color, #6366f1));
       display: flex;
       flex-direction: column;
       width: 100%;
@@ -1312,7 +1357,8 @@ class PcUserStatisticsPanel extends HTMLElement {
     .lb-time { font-size:14px; font-weight:700; color:var(--text); }
     .lb-cost { font-size:11px; color:var(--subtext); margin-top:1px; }
 
-    .stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
+    .stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; flex:1; min-width:0; }
+    .session-donut-row { display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
     .stat-card { background:var(--card2); border-radius:12px;
       padding:16px; text-align:center; border:2px solid transparent; }
     .stat-card.active { border-color:var(--accent);
@@ -1323,8 +1369,7 @@ class PcUserStatisticsPanel extends HTMLElement {
 
     /* Monthly layout */
     .monthly-layout { display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
-    .donut-wrapper { flex-shrink:0; }
-    .monthly-layout .user-monthly-grid { flex:1; min-width:200px; }
+    .donut-wrapper { flex-shrink:0; align-self:center; }
     .user-monthly-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
     .user-month-card { background:var(--card2); border-radius:12px; padding:16px; }
     .user-month-header { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
@@ -1517,6 +1562,11 @@ class PcUserStatisticsPanel extends HTMLElement {
     .cfg-input:focus { outline:none; border-color:var(--accent);
       box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent); }
 
+    .cfg-optional { font-size:10px; font-weight:400; color:var(--subtext); text-transform:none; letter-spacing:0; }
+    .select-wrap { position:relative; }
+    .select-caret { position:absolute; right:12px; top:50%; transform:translateY(-50%); pointer-events:none; color:var(--subtext); font-size:11px; }
+    .cfg-select { appearance:none; -webkit-appearance:none; cursor:pointer; padding-right:28px; }
+    .cfg-select option { background:var(--card2,#1e2029); color:var(--text,#e8eaf6); }
     .user-mappings-list { display:flex; flex-direction:column; gap:8px; margin-bottom:16px; }
     .user-mapping-row { display:flex; align-items:flex-end; gap:10px;
       background:var(--card2); border-radius:10px; padding:12px 14px; }
