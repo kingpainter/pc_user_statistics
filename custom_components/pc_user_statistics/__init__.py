@@ -1,19 +1,32 @@
 # File Name: __init__.py
-# Version: 2.2.0
+# Version: 2.4.1
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 1, 2026
+# Last Updated: March 2, 2026
+#
+# Changes in 2.4.1:
+#   FIX: Removed entry.add_update_listener(_async_options_updated).
+#        The listener triggered an immediate async_reload() whenever options were
+#        updated, which unloaded the integration while ws_save_config() was still
+#        waiting to send its WebSocket response. This caused a silent crash:
+#        the panel froze, data was not saved, and only a full HA restart helped.
+#
+#        Integration reload is now triggered exclusively by ws_save_config() via
+#        hass.async_create_task(_do_reload()), which runs AFTER send_result() has
+#        been delivered to the browser. This guarantees the WS round-trip completes
+#        before the coordinator is torn down.
 
 from datetime import datetime, timedelta
 import logging
 import time
 from typing import Any
 
+import aiohttp
+import urllib.parse
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.const import EVENT_STATE_CHANGED
-import aiohttp
-import urllib.parse
+from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
     DOMAIN,
@@ -34,6 +47,35 @@ from .const import (
 from .helpers import safe_float_from_state, parse_influxdb_response
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_user_map(raw: dict) -> dict[str, str]:
+    """
+    Normalize user_map values to plain strings.
+
+    The config UI (ws_save_config) may store values as dicts when an HA user
+    is linked, e.g. {'user_id': 'lukas', 'ha_user': 'da88c1c...'}.
+    The coordinator only needs the user_id string for session tracking.
+    """
+    normalized: dict[str, str] = {}
+    for sensor_state, value in raw.items():
+        if isinstance(value, dict):
+            user_id = value.get("user_id", "")
+            if user_id:
+                normalized[sensor_state] = str(user_id).lower()
+            else:
+                _LOGGER.warning(
+                    "user_map entry '%s' is a dict without 'user_id', skipping: %s",
+                    sensor_state, value,
+                )
+        elif isinstance(value, str) and value:
+            normalized[sensor_state] = value.lower()
+        else:
+            _LOGGER.warning(
+                "user_map entry '%s' has unexpected value type %s, skipping: %s",
+                sensor_state, type(value).__name__, value,
+            )
+    return normalized
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -58,15 +100,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
-        # Listen to state changes for user and power sensors
+        # ── Track only the two sensors we care about ───────────────────────
+        # async_track_state_change_event is far more efficient than the global
+        # EVENT_STATE_CHANGED bus — HA filters at the source, not in our code.
+        user_entity = entry.data.get("user_entity", USER_ENTITY)
+        watt_entity = entry.data.get("watt_entity", WATT_ENTITY)
+
         entry.async_on_unload(
-            hass.bus.async_listen(EVENT_STATE_CHANGED, coordinator._handle_state_change)
+            async_track_state_change_event(
+                hass,
+                [user_entity, watt_entity],
+                coordinator._handle_state_change,
+            )
         )
 
-        # Reload coordinator when options change (user list/mappings edited)
-        entry.async_on_unload(
-            entry.add_update_listener(_async_options_updated)
-        )
+        # ── FIX: Removed entry.add_update_listener(_async_options_updated) ──
+        # The update listener called async_reload() immediately when options
+        # changed, killing the WebSocket connection before ws_save_config()
+        # could send its response. Reload is now handled exclusively by
+        # ws_save_config() via hass.async_create_task() after send_result().
 
         # Register WebSocket API and sidebar panel
         from .websocket import async_register_websocket_commands
@@ -82,12 +134,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise
 
 
-async def _async_options_updated(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Called when the user saves new options. Reloads the integration."""
-    _LOGGER.info("Options updated, reloading PC User Statistics integration")
-    await hass.config_entries.async_reload(entry.entry_id)
-
-
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     _LOGGER.info("Unloading PC User Statistics integration (entry: %s)", entry.entry_id)
@@ -95,10 +141,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     try:
         unload_ok = await hass.config_entries.async_unload_platforms(entry, ["sensor"])
         if unload_ok:
+            coordinator: PCStatisticsCoordinator = hass.data[DOMAIN].get(entry.entry_id)
+            if coordinator:
+                await coordinator.async_shutdown()
+
             from .panel import async_unregister_panel, async_unregister_cards_resource
             async_unregister_panel(hass)
             await async_unregister_cards_resource(hass)
-            hass.data[DOMAIN].pop(entry.entry_id)
+            hass.data[DOMAIN].pop(entry.entry_id, None)
             _LOGGER.info("PC User Statistics integration unloaded successfully")
         return unload_ok
 
@@ -121,107 +171,142 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.config_entry = config_entry
         self.config = config_entry.data
 
-        # Load user configuration from options, fall back to defaults
-        self.user_map: dict[str, str] = config_entry.options.get(
-            CONF_USER_MAPPINGS, dict(DEFAULT_USER_MAP)
+        # ── Persistent HTTP session ────────────────────────────────────────
+        # One session reused for all InfluxDB writes and queries.
+        # Connector is closed explicitly in async_shutdown().
+        self._http_session: aiohttp.ClientSession = aiohttp.ClientSession(
+            auth=aiohttp.BasicAuth(
+                config_entry.data["username"],
+                config_entry.data["password"],
+            ),
+            timeout=aiohttp.ClientTimeout(total=5),
         )
+
+        # ── User configuration ─────────────────────────────────────────────
+        raw_map = config_entry.options.get(CONF_USER_MAPPINGS, dict(DEFAULT_USER_MAP))
+        self.user_map: dict[str, str] = _normalize_user_map(raw_map)
         self.tracked_users: list[str] = config_entry.options.get(
             CONF_TRACKED_USERS, list(DEFAULT_USERS)
         )
         _LOGGER.info(
             "User configuration loaded — tracked: %s, mappings: %s",
-            self.tracked_users, self.user_map
+            self.tracked_users, self.user_map,
         )
 
-        # Current session tracking
+        # ── Session tracking ───────────────────────────────────────────────
         self.current_user: str | None = None
         self.acc_time: float = 0.0
         self.acc_energy: float = 0.0
         self.acc_cost: float = 0.0
 
-        # Monthly tracking per user
+        # ── Monthly totals (in-memory, loaded from InfluxDB at startup) ────
         self.monthly: dict[str, dict[str, float]] = {
             user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
             for user in self.tracked_users
         }
+        # Track whether initial InfluxDB load has completed
+        self._monthly_loaded: bool = False
 
-        # Timing and state tracking
+        # ── Timing ────────────────────────────────────────────────────────
         self.last_time: float = time.time()
         self.last_power: float = 0.0
         self.last_month: int = datetime.utcnow().month
         self.last_write_time: float = time.time()
 
-        # InfluxDB write buffer for failed writes
+        # ── Write buffer for failed InfluxDB writes ────────────────────────
         self.failed_writes: list[dict] = []
 
+        # Load monthly data in the background — does NOT block coordinator init
         hass.async_create_task(self._async_load_monthly_data())
 
         _LOGGER.debug("PCStatisticsCoordinator initialized (entry: %s)", config_entry.entry_id)
 
+    async def async_shutdown(self) -> None:
+        """Close the persistent HTTP session. Called on integration unload."""
+        if not self._http_session.closed:
+            await self._http_session.close()
+            _LOGGER.debug("InfluxDB HTTP session closed")
+
+    # ── InfluxDB helpers ───────────────────────────────────────────────────
+
+    @property
+    def _influx_base_url(self) -> str:
+        return f"http://{self.config['host']}:{self.config['port']}"
+
     async def _async_load_monthly_data(self) -> None:
-        """Query InfluxDB for initial monthly sums asynchronously."""
+        """Query InfluxDB for initial monthly sums and merge into self.monthly."""
         now = datetime.utcnow()
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat() + 'Z'
+        month_start = (
+            now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+        )
 
         query = (
             f'SELECT SUM("time_delta") AS "time", '
             f'SUM("energy_delta") AS "energy", '
             f'SUM("cost_delta") AS "cost" '
             f'FROM {MEASUREMENT} '
-            f'WHERE time >= \'{month_start}\' '
+            f"WHERE time >= '{month_start}' "
             f'GROUP BY "user"'
         )
 
         try:
-            async with aiohttp.ClientSession() as session:
-                query_params = urllib.parse.urlencode({
-                    "q": query,
-                    "db": self.config["database"]
-                })
-                auth = aiohttp.BasicAuth(
-                    self.config["username"],
-                    self.config["password"]
-                )
+            query_params = urllib.parse.urlencode({"q": query, "db": self.config["database"]})
+            async with self._http_session.get(
+                f"{self._influx_base_url}/query?{query_params}"
+            ) as response:
+                if response.status != 200:
+                    _LOGGER.error("InfluxDB monthly query failed: HTTP %s", response.status)
+                    return
 
-                async with session.get(
-                    f"http://{self.config['host']}:{self.config['port']}/query?{query_params}",
-                    auth=auth,
-                    timeout=aiohttp.ClientTimeout(total=5)
-                ) as response:
-                    if response.status != 200:
-                        _LOGGER.error("InfluxDB query failed: HTTP %s", response.status)
-                        return
+                data = await response.json()
 
-                    data = await response.json()
+            field_mappings = {"time": 1, "energy": 2, "cost": 3}
+            parsed_data = parse_influxdb_response(data, field_mappings)
 
-                    field_mappings = {"time": 1, "energy": 2, "cost": 3}
-                    parsed_data = parse_influxdb_response(data, field_mappings)
+            # Merge InfluxDB totals into monthly.
+            # We REPLACE the stored values (don't add to them) because the
+            # in-memory accumulator may have already counted deltas that are
+            # included in the InfluxDB sum — replacing avoids double-counting.
+            for user, values in parsed_data.items():
+                if user in self.monthly:
+                    self.monthly[user].update(values)
 
-                    for user, values in parsed_data.items():
-                        if user in self.monthly:
-                            self.monthly[user].update(values)
-
-                    _LOGGER.info("Loaded monthly data: %s", self.monthly)
+            self._monthly_loaded = True
+            _LOGGER.info("Monthly data loaded from InfluxDB: %s", self.monthly)
 
         except aiohttp.ClientError as err:
             _LOGGER.error("Failed to query monthly data from InfluxDB: %s", err)
         except Exception as err:
             _LOGGER.exception("Unexpected error loading monthly data: %s", err)
 
+    # ── Coordinator update ─────────────────────────────────────────────────
+
     async def _async_update_data(self) -> dict[str, Any]:
-        """Update data (called by coordinator at regular intervals)."""
+        """Called by the coordinator at regular intervals."""
         now = time.time()
 
+        # Roll over monthly totals on month change
         current_month = datetime.utcnow().month
         if current_month != self.last_month:
             _LOGGER.info("Month changed, reloading monthly data")
+            self.monthly = {
+                user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+                for user in self.tracked_users
+            }
+            self._monthly_loaded = False
             await self._async_load_monthly_data()
             self.last_month = current_month
 
+        # Retry any buffered writes
         if self.failed_writes:
             await self._retry_failed_writes()
 
         await self._calculate_deltas(now, force_write=True)
+
+        # BUG FIX: update last_time after polling delta so the next 60s poll
+        # calculates delta from NOW, not from the previous poll or state-change.
+        # Without this, each poll accumulates time from an ever-growing window.
+        self.last_time = now
 
         # Evaluate notification rules
         try:
@@ -233,25 +318,29 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         return self._get_data()
 
+    # ── State change handling ──────────────────────────────────────────────
+
     @callback
     def _handle_state_change(self, event) -> None:
-        """Handle state changes for user or power sensors (sync callback)."""
-        entity_id = event.data.get("entity_id")
-        if entity_id not in [self.config_entry.data.get('user_entity', USER_ENTITY), self.config_entry.data.get('watt_entity', WATT_ENTITY)]:
-            return
+        """Sync callback — dispatched only for the two tracked entity IDs."""
         self.hass.async_create_task(self._async_handle_state_change(event))
 
     async def _async_handle_state_change(self, event) -> None:
-        """Async handler for state changes."""
+        """Async handler for user/power state changes."""
         entity_id = event.data.get("entity_id")
         now = time.time()
 
-        if entity_id == self.config_entry.data.get('user_entity', USER_ENTITY):
-            await self._handle_user_change(event, now)
-        elif entity_id == self.config_entry.data.get('watt_entity', WATT_ENTITY) and self.current_user:
-            await self._handle_power_change(now)
+        user_entity = self.config_entry.data.get("user_entity", USER_ENTITY)
+        watt_entity = self.config_entry.data.get("watt_entity", WATT_ENTITY)
 
-        self.last_time = now
+        if entity_id == user_entity:
+            await self._handle_user_change(event, now)
+            # Note: last_time is set inside _handle_user_change for user events
+        elif entity_id == watt_entity and self.current_user:
+            await self._handle_power_change(now)
+            # Update last_time for power-change events
+            self.last_time = now
+
         self.async_set_updated_data(self._get_data())
 
     async def _handle_user_change(self, event, now: float) -> None:
@@ -263,11 +352,22 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         else:
             user_key = new_state.state.lower()
 
-        # Use options-based user_map instead of hardcoded constant
-        new_user = self.user_map.get(user_key)
+        raw_mapped = self.user_map.get(user_key) if user_key is not None else None
+
+        # Defensive: guard against dict values that slipped through normalization
+        if isinstance(raw_mapped, dict):
+            _LOGGER.warning(
+                "user_map returned a dict for key '%s' — normalizing on the fly: %s",
+                user_key, raw_mapped,
+            )
+            new_user: str | None = raw_mapped.get("user_id") or None
+        elif isinstance(raw_mapped, str) and raw_mapped:
+            new_user = raw_mapped
+        else:
+            new_user = None
 
         if new_user != self.current_user:
-            _LOGGER.info("User changed from %s to %s", self.current_user, new_user)
+            _LOGGER.info("User changed: %s → %s", self.current_user, new_user)
 
             if self.current_user:
                 await self._calculate_deltas(now, force_write=True)
@@ -279,37 +379,51 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 self.acc_cost = 0.0
                 self.last_power = self._get_power()
 
+            # BUG FIX: reset last_time HERE so the new user's first delta
+            # starts from this moment — not from whenever the previous user's
+            # last event was. Without this, the first _calculate_deltas call
+            # for the new user inherits the old last_time and adds phantom time.
+            self.last_time = now
             self.last_write_time = now
 
     async def _handle_power_change(self, now: float) -> None:
         """Handle power sensor state change."""
         await self._calculate_deltas(now)
 
+    # ── Delta calculation ──────────────────────────────────────────────────
+
     async def _calculate_deltas(self, now: float, force_write: bool = False) -> None:
-        """Calculate and accumulate deltas, write to InfluxDB if applicable."""
+        """Accumulate time/energy/cost deltas and optionally write to InfluxDB."""
         if not self.current_user:
+            return
+
+        if not isinstance(self.current_user, str):
+            _LOGGER.error(
+                "_calculate_deltas: current_user is not a string (%s), resetting",
+                type(self.current_user).__name__,
+            )
+            self.current_user = None
             return
 
         delta_time = now - self.last_time
         if delta_time <= 0:
-            _LOGGER.debug("Non-positive delta_time: %s, skipping calculation", delta_time)
+            _LOGGER.debug("Non-positive delta_time: %s, skipping", delta_time)
             return
 
         current_power = self._get_power()
-        avg_power = (current_power + self.last_power) / 2
-        energy_delta = avg_power * delta_time / 3600000  # W → kWh
+        avg_power     = (current_power + self.last_power) / 2
+        energy_delta  = avg_power * delta_time / 3_600_000  # W·s → kWh
+        price         = self._get_price()
+        cost_delta    = energy_delta * price
 
-        price = self._get_price()
-        cost_delta = energy_delta * price
-
-        self.acc_time += delta_time
+        self.acc_time   += delta_time
         self.acc_energy += energy_delta
-        self.acc_cost += cost_delta
+        self.acc_cost   += cost_delta
 
         if self.current_user in self.monthly:
-            self.monthly[self.current_user]["time"] += delta_time
+            self.monthly[self.current_user]["time"]   += delta_time
             self.monthly[self.current_user]["energy"] += energy_delta
-            self.monthly[self.current_user]["cost"] += cost_delta
+            self.monthly[self.current_user]["cost"]   += cost_delta
 
         time_since_write = now - self.last_write_time
         if force_write or time_since_write >= WRITE_THRESHOLD:
@@ -318,117 +432,106 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         self.last_power = current_power
 
+    # ── Sensor helpers ─────────────────────────────────────────────────────
+
     def _get_power(self) -> float:
-        """Get net power (PC power minus meter power)."""
-        watt_state = self.hass.states.get(self.config_entry.data.get('watt_entity', WATT_ENTITY))
-        device_power_state = self.hass.states.get(self.config_entry.data.get('device_power_entity', DEVICE_POWER_ENTITY))
-
-        watt = safe_float_from_state(watt_state, default=0.0, min_value=0.0)
-        device_power = safe_float_from_state(device_power_state, default=0.0, min_value=0.0)
-
+        """Net PC power = watt sensor minus meter device overhead."""
+        watt_state   = self.hass.states.get(self.config_entry.data.get("watt_entity", WATT_ENTITY))
+        device_state = self.hass.states.get(self.config_entry.data.get("device_power_entity", DEVICE_POWER_ENTITY))
+        watt         = safe_float_from_state(watt_state,   default=0.0, min_value=0.0)
+        device_power = safe_float_from_state(device_state, default=0.0, min_value=0.0)
         return max(watt - device_power, 0.0)
 
     def _get_price(self) -> float:
-        """Get current energy price."""
-        price_state = self.hass.states.get(self.config_entry.data.get('price_entity', PRICE_ENTITY))
+        """Current energy price in DKK/kWh."""
+        price_state = self.hass.states.get(self.config_entry.data.get("price_entity", PRICE_ENTITY))
         return safe_float_from_state(price_state, default=0.0, min_value=0.0)
+
+    # ── InfluxDB write ─────────────────────────────────────────────────────
 
     async def _async_write_to_influx(
         self,
         power: float,
         time_delta: float,
         energy_delta: float,
-        cost_delta: float
+        cost_delta: float,
     ) -> None:
-        """Write point to InfluxDB asynchronously. Buffers on failure."""
+        """Build line-protocol point and write to InfluxDB. Buffers on failure."""
         timestamp_ns = int(datetime.utcnow().timestamp() * 1_000_000_000)
         point = (
-            f'{MEASUREMENT},user={self.current_user} '
-            f'power={power},time_delta={time_delta},'
-            f'energy_delta={energy_delta},cost_delta={cost_delta} '
-            f'{timestamp_ns}'
+            f"{MEASUREMENT},user={self.current_user} "
+            f"power={power},time_delta={time_delta},"
+            f"energy_delta={energy_delta},cost_delta={cost_delta} "
+            f"{timestamp_ns}"
         )
-
         success = await self._write_point_to_influx(point)
         if not success:
             self._buffer_failed_write({"point": point, "timestamp": timestamp_ns, "attempts": 1})
 
     async def _write_point_to_influx(self, point: str) -> bool:
-        """Attempt a single write to InfluxDB. Returns True on success."""
+        """Write a single line-protocol point. Returns True on success."""
         try:
-            async with aiohttp.ClientSession() as session:
-                auth = aiohttp.BasicAuth(
-                    self.config["username"],
-                    self.config["password"]
-                )
-                async with session.post(
-                    f"http://{self.config['host']}:{self.config['port']}/write?db={self.config['database']}",
-                    data=point,
-                    auth=auth,
-                    timeout=aiohttp.ClientTimeout(total=5)
-                ) as response:
-                    if response.status != 204:
-                        _LOGGER.warning("Failed to write to InfluxDB: HTTP %s", response.status)
-                        return False
-                    _LOGGER.debug("Wrote data to InfluxDB: %s", point)
-                    return True
+            url = f"{self._influx_base_url}/write?db={self.config['database']}"
+            async with self._http_session.post(url, data=point) as response:
+                if response.status != 204:
+                    _LOGGER.warning("InfluxDB write failed: HTTP %s", response.status)
+                    return False
+                _LOGGER.debug("InfluxDB write OK: %s", point)
+                return True
         except aiohttp.ClientError as err:
-            _LOGGER.warning("Failed to write to InfluxDB: %s", err)
+            _LOGGER.warning("InfluxDB write error: %s", err)
             return False
         except Exception as err:
-            _LOGGER.exception("Unexpected error writing to InfluxDB: %s", err)
+            _LOGGER.exception("Unexpected InfluxDB write error: %s", err)
             return False
 
     def _buffer_failed_write(self, write_data: dict) -> None:
-        """Add a failed write to the buffer. Drops oldest if buffer is full."""
+        """FIFO buffer for failed writes. Drops oldest when full."""
         if len(self.failed_writes) >= MAX_BUFFERED_WRITES:
             dropped = self.failed_writes.pop(0)
             _LOGGER.warning(
-                "Write buffer full (%d/%d), dropped oldest point (ts=%s)",
-                MAX_BUFFERED_WRITES, MAX_BUFFERED_WRITES, dropped.get("timestamp")
+                "Write buffer full, dropped oldest point (ts=%s)",
+                dropped.get("timestamp"),
             )
         self.failed_writes.append(write_data)
         _LOGGER.info(
-            "Buffered failed write (buffer size: %d/%d)",
-            len(self.failed_writes), MAX_BUFFERED_WRITES
+            "Buffered failed write (%d/%d)",
+            len(self.failed_writes), MAX_BUFFERED_WRITES,
         )
 
     async def _retry_failed_writes(self) -> None:
-        """Retry buffered failed writes. Drops points that exceed max attempts."""
+        """Retry buffered failed writes. Drops after max attempts."""
         _LOGGER.info("Retrying %d buffered write(s)", len(self.failed_writes))
         still_failing: list[dict] = []
 
         for write_data in self.failed_writes:
             if write_data["attempts"] >= MAX_RETRY_ATTEMPTS:
                 _LOGGER.error(
-                    "Max retry attempts (%d) reached, dropping buffered point (ts=%s)",
-                    MAX_RETRY_ATTEMPTS, write_data.get("timestamp")
+                    "Max retries (%d) reached, dropping point (ts=%s)",
+                    MAX_RETRY_ATTEMPTS, write_data.get("timestamp"),
                 )
                 continue
 
             write_data["attempts"] += 1
-            success = await self._write_point_to_influx(write_data["point"])
-
-            if success:
+            if await self._write_point_to_influx(write_data["point"]):
                 _LOGGER.info(
-                    "Successfully retried buffered write (attempt %d/%d)",
-                    write_data["attempts"], MAX_RETRY_ATTEMPTS
+                    "Retry succeeded (attempt %d/%d)",
+                    write_data["attempts"], MAX_RETRY_ATTEMPTS,
                 )
             else:
-                _LOGGER.debug(
-                    "Retry failed for buffered point (attempt %d/%d), will retry later",
-                    write_data["attempts"], MAX_RETRY_ATTEMPTS
-                )
                 still_failing.append(write_data)
 
         self.failed_writes = still_failing
 
+    # ── Data snapshot ──────────────────────────────────────────────────────
+
     def _get_data(self) -> dict[str, Any]:
-        """Return current data snapshot."""
+        """Return current data snapshot for coordinator listeners and sensors."""
         return {
-            "current_user": self.current_user,
-            "acc_time": self.acc_time,
-            "acc_energy": self.acc_energy,
-            "acc_cost": self.acc_cost,
-            "monthly": self.monthly,
+            "current_user":   self.current_user,
+            "acc_time":       self.acc_time,
+            "acc_energy":     self.acc_energy,
+            "acc_cost":       self.acc_cost,
+            "monthly":        self.monthly,
+            "monthly_loaded": self._monthly_loaded,
         }

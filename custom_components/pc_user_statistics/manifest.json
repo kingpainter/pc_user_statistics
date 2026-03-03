@@ -1,11 +1,10 @@
 {
   "domain": "pc_user_statistics",
   "name": "PC User Statistics",
-  "version": "2.3.1",
+  "version": "2.4.1",
   "documentation": "https://github.com/kingpainter/pc_user_statistics",
   "issue_tracker": "https://github.com/kingpainter/pc_user_statistics/issues",
   "requirements": [
-    "influxdb==5.3.2",
     "aiohttp>=3.8.0"
   ],
   "dependencies": [

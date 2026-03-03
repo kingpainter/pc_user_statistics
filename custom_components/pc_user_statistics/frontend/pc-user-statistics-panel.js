@@ -1,6 +1,12 @@
 // PC User Statistics Panel
-// Version: 2.3.2 — Vanilla JS (no imports)
+// Version: 2.4.1 — Vanilla JS (no imports)
 // Last Updated: March 2, 2026
+//
+// Fixes in 2.4.1:
+//   - FIX: TypeError: Assignment to constant variable in _statisticsHTML()
+//          const s was reassigned — now uses let sd (separate normalized copy)
+//   - FIX: CustomElementRegistry: name "pc-user-statistics-panel" already used
+//          Added customElements.get() guard before define()
 
 class PcUserStatisticsPanel extends HTMLElement {
   constructor() {
@@ -50,7 +56,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._render();
     this._interval = setInterval(() => {
       if (this._errCount > 3) { clearInterval(this._interval); return; }
-      if (document.visibilityState === "visible") this._load();
+      if (document.visibilityState === "visible") this._loadForTab();
     }, 30000);
   }
 
@@ -67,6 +73,8 @@ class PcUserStatisticsPanel extends HTMLElement {
   }
 
   // ── Data loading ──────────────────────────────────────────────
+
+  // Full load — used on first connect and manual refresh button
   async _load() {
     if (!this._hass) return;
     try {
@@ -82,6 +90,38 @@ class PcUserStatisticsPanel extends HTMLElement {
     } catch (e) {
       this._errCount++;
       console.error("PC Stats load error:", e);
+    }
+    this._render();
+  }
+
+  // Smart poll — only fetches what the active tab actually needs.
+  // History and config are static; no need to re-fetch on every tick.
+  async _loadForTab() {
+    if (!this._hass) return;
+    try {
+      const tab = this._tab;
+      if (tab === "statistics" || tab === "users") {
+        this._stats = await this._hass.callWS({ type: "pc_user_statistics/get_stats" });
+      } else if (tab === "notifications") {
+        const [stats, notif] = await Promise.all([
+          this._hass.callWS({ type: "pc_user_statistics/get_stats" }),
+          this._hass.callWS({ type: "pc_user_statistics/get_notifications" }),
+        ]);
+        this._stats = stats;
+        this._notif = notif;
+      } else if (tab === "admin") {
+        const [stats, system] = await Promise.all([
+          this._hass.callWS({ type: "pc_user_statistics/get_stats" }),
+          this._hass.callWS({ type: "pc_user_statistics/get_system" }),
+        ]);
+        this._stats  = stats;
+        this._system = system;
+      }
+      // history + config: never auto-refresh
+      this._errCount = 0;
+    } catch (e) {
+      this._errCount++;
+      console.error("PC Stats poll error:", e);
     }
     this._render();
   }
@@ -106,11 +146,9 @@ class PcUserStatisticsPanel extends HTMLElement {
   _fmtCost(d)   { return d ? d.toFixed(2).replace(".",",")+" kr"  : "0,00 kr"; }
   _userColor(n) {
     const cols = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6"];
-    // Always use tracked_users index for consistent colors across all panels and cards
     const users = this._stats?.tracked_users ?? [];
     const idx = users.indexOf((n || "").toLowerCase());
     if (idx >= 0) return cols[idx % cols.length];
-    // Fallback: hash (if user not in tracked list)
     let h = 0; for (const c of n||"") h = c.charCodeAt(0)+h*31;
     return cols[Math.abs(h)%cols.length];
   }
@@ -182,184 +220,116 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._render();
   }
 
-  // ── Event delegation ──────────────────────────────────────────
-  _bind() {
-    const root = this.shadowRoot;
+  // ── Tab order persistence ─────────────────────────────────────
+  static get ALL_TABS() {
+    return [
+      {id:"statistics",    label:"Statistik",      icon:"📊"},
+      {id:"users",         label:"Brugere",         icon:"👤"},
+      {id:"notifications", label:"Notifikationer",  icon:"🔔"},
+      {id:"history",       label:"Historik",        icon:"📈"},
+      {id:"config",        label:"Konfiguration",   icon:"🔧"},
+      {id:"admin",         label:"Admin",           icon:"⚙️"},
+    ];
+  }
 
-    // Tabs
-    root.querySelectorAll(".tab").forEach(el => {
-      el.addEventListener("click", () => {
-        this._tab = el.dataset.tab;
-        this._render();
-        if (el.dataset.tab === "history" && !this._history) this._loadHistory();
-        if (el.dataset.tab === "config"  && !this._config)  this._loadConfig();
-        if (el.dataset.tab === "config"  && !this._haUsers.length) this._loadHaUsers();
-      });
-    });
-
-    // Refresh
-    root.querySelector(".refresh-btn")?.addEventListener("click", () => this._load());
-
-    // Hamburger
-    root.querySelector(".menu-btn")?.addEventListener("click", () => {
-      this.dispatchEvent(new Event("hass-toggle-menu",{bubbles:true,composed:true}));
-    });
-
-    if (this._tab === "config" && this._config) {
-      root.querySelector(".cfg-save-btn")?.addEventListener("click", () => this._saveConfig());
-      root.querySelector(".cfg-cancel-btn")?.addEventListener("click", () => {
-        this._config = null; this._configState = null; this._loadConfig();
-      });
-      // Tab sorter drag-and-drop
-      const sorter = root.querySelector("#tab-sorter");
-      if (sorter) {
-        let dragIdx = null;
-
-        sorter.querySelectorAll(".tab-sort-item").forEach(el => {
-          el.addEventListener("dragstart", e => {
-            dragIdx = parseInt(el.dataset.idx);
-            el.classList.add("dragging");
-            e.dataTransfer.effectAllowed = "move";
-          });
-          el.addEventListener("dragend", () => {
-            el.classList.remove("dragging");
-            sorter.querySelectorAll(".tab-sort-item").forEach(x => x.classList.remove("drag-over"));
-          });
-          el.addEventListener("dragover", e => {
-            e.preventDefault();
-            e.dataTransfer.dropEffect = "move";
-            sorter.querySelectorAll(".tab-sort-item").forEach(x => x.classList.remove("drag-over"));
-            el.classList.add("drag-over");
-          });
-          el.addEventListener("drop", e => {
-            e.preventDefault();
-            const targetIdx = parseInt(el.dataset.idx);
-            if (dragIdx === null || dragIdx === targetIdx) return;
-            const newOrder = [...this._tabOrder];
-            const [moved]  = newOrder.splice(dragIdx, 1);
-            newOrder.splice(targetIdx, 0, moved);
-            this._saveTabOrder(newOrder);
-            this._render();
-          });
-        });
+  _loadTabOrder() {
+    try {
+      const saved = localStorage.getItem("pc_stats_tab_order");
+      if (saved) {
+        const ids = JSON.parse(saved);
+        const allIds = PcUserStatisticsPanel.ALL_TABS.map(t => t.id);
+        const valid = ids.filter(id => allIds.includes(id));
+        allIds.forEach(id => { if (!valid.includes(id)) valid.push(id); });
+        return valid;
       }
+    } catch(e) {}
+    return PcUserStatisticsPanel.ALL_TABS.map(t => t.id);
+  }
 
-      root.querySelector(".reset-tabs-btn")?.addEventListener("click", () => {
-        this._saveTabOrder(PcUserStatisticsPanel.ALL_TABS.map(t => t.id));
-        this._render();
-      });
+  _saveTabOrder(order) {
+    try { localStorage.setItem("pc_stats_tab_order", JSON.stringify(order)); } catch(e) {}
+    this._tabOrder = order;
+  }
 
-      root.querySelector(".add-mapping-btn")?.addEventListener("click", () => {
-        // Add empty row — keep as object (supports new format)
-        const updated = { ...this._config.user_mappings };
-        updated[""] = { user_id: "", ha_user: "" };
-        this._config = { ...this._config, user_mappings: updated };
-        this._render();
-      });
-      root.querySelectorAll(".remove-row-btn").forEach(btn => {
-        btn.addEventListener("click", () => {
-          const idx     = parseInt(btn.dataset.idx);
-          const entries = Object.entries(this._config.user_mappings || {});
-          entries.splice(idx, 1);
-          this._config = { ...this._config, user_mappings: Object.fromEntries(entries) };
-          this._render();
-        });
-      });
+  _orderedTabs() {
+    const all = PcUserStatisticsPanel.ALL_TABS;
+    return this._tabOrder
+      .map(id => all.find(t => t.id === id))
+      .filter(Boolean);
+  }
+
+  // ── Config load/save ──────────────────────────────────────────
+  async _loadConfig() {
+    if (!this._hass) return;
+    try {
+      this._config = await this._hass.callWS({ type: "pc_user_statistics/get_config" });
+    } catch(e) {
+      console.error("Config load error:", e);
+      this._config = {};
     }
+    this._render();
+  }
 
-    if (this._tab === "history") {
-      root.querySelectorAll(".metric-btn").forEach(el => {
-        el.addEventListener("click", () => { this._histMetric = el.dataset.metric; this._render(); });
-      });
-      root.querySelector(".reload-hist-btn")?.addEventListener("click", () => {
-        this._history = null; this._render(); this._loadHistory();
-      });
-    }
-
-    if (this._tab === "notifications" && this._notif) {
-      // Device checkboxes
-      root.querySelectorAll(".dev-check").forEach(el => {
-        el.addEventListener("change", () => {
-          const devs = [...root.querySelectorAll(".dev-check")]
-            .filter(c=>c.checked).map(c=>c.value);
-          this._saveDevices(devs);
-        });
-      });
-
-      // Toggle switches
-      root.querySelectorAll(".rule-toggle").forEach(el => {
-        el.addEventListener("change", () => this._toggleRule(el.dataset.rule));
-      });
-
-      // Edit buttons
-      root.querySelectorAll(".edit-btn").forEach(el => {
-        el.addEventListener("click", () => {
-          const id = el.dataset.rule;
-          if (this._editingRule === id) {
-            this._editingRule = null;
-          } else {
-            this._editingRule = id;
-            this._newRule = { ...this._notif.rules[id], id };
-          }
-          this._render();
-        });
-      });
-
-      // Test buttons
-      root.querySelectorAll(".test-btn").forEach(el => {
-        el.addEventListener("click", () => this._testRule(el.dataset.rule));
-      });
-
-      // Delete buttons
-      root.querySelectorAll(".del-btn").forEach(el => {
-        el.addEventListener("click", () => this._deleteRule(el.dataset.rule));
-      });
-
-      // Save edit
-      root.querySelector(".save-edit-btn")?.addEventListener("click", () => {
-        const r = this._collectForm("edit-form");
-        if (r) this._saveRule(this._editingRule, { ...this._notif.rules[this._editingRule], ...r });
-      });
-      root.querySelector(".cancel-edit-btn")?.addEventListener("click", () => {
-        this._editingRule = null; this._render();
-      });
-
-      // New rule
-      root.querySelector(".show-create-btn")?.addEventListener("click", () => {
-        this._showCreate = !this._showCreate;
-        this._editingRule = null;
-        this._render();
-      });
-      root.querySelector(".save-new-btn")?.addEventListener("click", () => {
-        const r = this._collectForm("create-form");
-        if (!r) return;
-        const id = `custom_${Date.now()}`;
-        this._saveRule(id, { ...r, id, enabled:false, is_custom:true });
-      });
-      root.querySelector(".cancel-new-btn")?.addEventListener("click", () => {
-        this._showCreate = false; this._newRule = this._emptyRule(); this._render();
-      });
+  async _loadHaUsers() {
+    try {
+      const result = await this._hass.callWS({ type: "config/auth/list" });
+      this._haUsers = (result || []).map(u => ({ id: u.id, name: u.name }));
+      this._render();
+    } catch (e) {
+      console.warn("[PC Stats] Kunne ikke hente HA brugere:", e);
     }
   }
 
-  _collectForm(formClass) {
+  async _saveConfig() {
+    if (!this._hass || this._configSaving) return;
     const root = this.shadowRoot;
-    const f = root.querySelector(`.${formClass}`);
-    if (!f) return null;
-    const name = f.querySelector(".f-name")?.value?.trim();
-    if (!name) { alert("Giv reglen et navn"); return null; }
-    const targets = [...f.querySelectorAll(".f-user:checked")].map(el=>el.value);
-    return {
-      name,
-      icon:             f.querySelector(".f-icon")?.value || "🔔",
-      trigger_type:     f.querySelector(".f-ttype")?.value || "session_minutes",
-      trigger_value:    parseFloat(f.querySelector(".f-tval")?.value) || 60,
-      title:            f.querySelector(".f-title")?.value || "",
-      message:          f.querySelector(".f-msg")?.value || "",
-      repeat:           f.querySelector(".f-repeat")?.checked || false,
-      repeat_interval:  parseFloat(f.querySelector(".f-interval")?.value) || 60,
-      user_targets:     targets,
+
+    const getVal = cls => root.querySelector(cls)?.value?.trim() || "";
+    const payload = {
+      user_entity:         getVal(".cfg-user-entity"),
+      watt_entity:         getVal(".cfg-watt-entity"),
+      device_power_entity: getVal(".cfg-device-power-entity"),
+      price_entity:        getVal(".cfg-price-entity"),
+      user_mappings: {},
+      tracked_users: [],
     };
+
+    const rows = root.querySelectorAll(".user-mapping-row");
+    let valid = true;
+    rows.forEach(row => {
+      const sensorState = row.querySelector(".cfg-sensor-state")?.value?.trim();
+      const userId      = row.querySelector(".cfg-user-id")?.value?.trim().toLowerCase();
+      const haUser      = row.querySelector(".cfg-ha-user")?.value?.trim() || "";
+      if (sensorState && userId) {
+        payload.user_mappings[sensorState] = haUser
+          ? { user_id: userId, ha_user: haUser }
+          : userId;
+        if (!payload.tracked_users.includes(userId))
+          payload.tracked_users.push(userId);
+      } else if (sensorState || userId) {
+        valid = false;
+      }
+    });
+
+    if (!valid) { alert("Alle bruger-rækker skal have både sensor-tilstand og bruger-ID"); return; }
+    if (!payload.tracked_users.length) { alert("Mindst én bruger skal konfigureres"); return; }
+
+    this._configSaving = true;
+    this._configState  = null;
+    this._render();
+
+    try {
+      await this._hass.callWS({ type: "pc_user_statistics/save_config", ...payload });
+      this._configState  = "saved";
+      this._configSaving = false;
+      this._config = { ...this._config, ...payload };
+      this._render();
+    } catch(e) {
+      console.error("Save config error:", e);
+      this._configState  = "error";
+      this._configSaving = false;
+      this._render();
+    }
   }
 
   // ── SVG Donut ─────────────────────────────────────────────────
@@ -419,7 +389,8 @@ class PcUserStatisticsPanel extends HTMLElement {
   }
 
   _headerHTML() {
-    const user    = this._stats?.current_user;
+    const rawUser = this._stats?.current_user;
+    const user    = rawUser && typeof rawUser === "object" ? (rawUser.name ?? rawUser.id ?? String(rawUser)) : (rawUser || null);
     const isLive  = !!user;
     const wattTxt = this._watt != null ? this._watt.toFixed(0)+"W" : "—";
     const wattPct = this._watt != null ? Math.min(this._watt / 600, 1) : 0;
@@ -468,18 +439,25 @@ class PcUserStatisticsPanel extends HTMLElement {
       + '</div>';
   }
 
+  // ── FIX: Was reassigning const s → now uses let sd (normalized copy) ──────
   _statisticsHTML() {
     const s = this._stats;
     if (!s) return `<div class="empty-state">Indlæser...</div>`;
     const users = s.tracked_users||[];
     const monthly = s.monthly||{};
 
-    const sessionActive = s.current_user ? "active" : "";
+    // Normalize current_user — coordinator may return an object in edge cases
+    const rawCU = s.current_user;
+    const cu = rawCU && typeof rawCU === "object" ? (rawCU.name ?? rawCU.id ?? String(rawCU)) : (rawCU || null);
+    // FIX: use a new let variable instead of reassigning const s
+    const sd = { ...s, current_user: cu };
+
+    const sessionActive = sd.current_user ? "active" : "";
     const cards3 = `
       <div class="stat-grid">
-        <div class="stat-card ${sessionActive}"><div class="stat-icon">⏱️</div><div class="stat-value">${this._fmtTime(s.acc_time)}</div><div class="stat-label">Sessionstid</div></div>
-        <div class="stat-card"><div class="stat-icon">⚡</div><div class="stat-value">${this._fmtEnergy(s.acc_energy)}</div><div class="stat-label">Sessionsenergi</div></div>
-        <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-value">${this._fmtCost(s.acc_cost)}</div><div class="stat-label">Sessionspris</div></div>
+        <div class="stat-card ${sessionActive}"><div class="stat-icon">⏱️</div><div class="stat-value">${this._fmtTime(sd.acc_time)}</div><div class="stat-label">Sessionstid</div></div>
+        <div class="stat-card"><div class="stat-icon">⚡</div><div class="stat-value">${this._fmtEnergy(sd.acc_energy)}</div><div class="stat-label">Sessionsenergi</div></div>
+        <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-value">${this._fmtCost(sd.acc_cost)}</div><div class="stat-label">Sessionspris</div></div>
       </div>`;
 
     const userCards = users.map(u => {
@@ -519,8 +497,8 @@ class PcUserStatisticsPanel extends HTMLElement {
     const users = s.tracked_users||[];
     const inv   = Object.fromEntries(Object.entries(s.user_map||{}).map(([k,v])=>[v,k]));
 
-    const activeCard = s.current_user ? `
-      <div class="active-user-card">
+    const activeCard = s.current_user ?
+      `<div class="active-user-card">
         <div class="avatar large" style="background:${this._userColor(s.current_user)}">${s.current_user[0].toUpperCase()}</div>
         <div class="active-user-info">
           <div class="active-user-name">${this._esc(s.current_user)}</div>
@@ -558,7 +536,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     const users     = this._stats?.tracked_users||[];
     const premadeIds= ["pause_reminder","long_session","cost_limit","idle_pc"];
 
-    // Devices
     const devRows = available.length===0
       ? `<div class="empty-state small">Ingen HA Companion apps fundet. Installer Home Assistant-appen på din mobil.</div>`
       : available.map(d=>`
@@ -713,8 +690,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       </div>`;
   }
 
-
-
   // ── Leaderboard ───────────────────────────────────────────────
   _leaderboardHTML(users, monthly) {
     const COLORS  = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6"];
@@ -733,7 +708,7 @@ class PcUserStatisticsPanel extends HTMLElement {
       const color = COLORS[users.indexOf(r.u) % COLORS.length];
       const medal = MEDALS[i] || `#${i+1}`;
       return `
-        <div class="lb-row${i===0 ? " lb-first" : ""}">
+        <div class="lb-row${i===0?" lb-first":""}">
           <div class="lb-rank">${medal}</div>
           <div class="lb-avatar" style="background:${color}">${r.u[0].toUpperCase()}</div>
           <div class="lb-info">
@@ -752,124 +727,160 @@ class PcUserStatisticsPanel extends HTMLElement {
     return `<div class="leaderboard">${rows}</div>`;
   }
 
+  // ── History tab ────────────────────────────────────────────────
+  _historyHTML() {
+    if (!this._history) {
+      return `<div class="empty-state">Indlæser historik fra InfluxDB...</div>`;
+    }
 
+    const { days, users, series } = this._history;
+    const m = this._histMetric;
 
-  // ── Tab order persistence ─────────────────────────────────────
-  static get ALL_TABS() {
-    return [
-      {id:"statistics",    label:"Statistik",      icon:"📊"},
-      {id:"users",         label:"Brugere",         icon:"👤"},
-      {id:"notifications", label:"Notifikationer",  icon:"🔔"},
-      {id:"history",       label:"Historik",        icon:"📈"},
-      {id:"config",        label:"Konfiguration",   icon:"🔧"},
-      {id:"admin",         label:"Admin",           icon:"⚙️"},
-    ];
+    const metricBtns = [
+      ["time",   "⏱️ Tid"],
+      ["energy", "⚡ Energi"],
+      ["cost",   "💰 Pris"],
+    ].map(([id, label]) =>
+      `<button class="metric-btn${m===id?" active":""}" data-metric="${id}">${label}</button>`
+    ).join("");
+
+    return `
+      <div class="hist-toolbar">
+        <div class="metric-selector">${metricBtns}</div>
+        <button class="reload-hist-btn">🔄 Opdater</button>
+      </div>
+
+      <div class="section-title">Daglig fordeling — seneste 30 dage</div>
+      <div class="bar-chart-wrap">
+        ${this._barChartSVG(days, users, series, m)}
+      </div>
+
+      <div class="section-title">Seneste 7 dage</div>
+      ${this._weekSummaryHTML(days, users, series, m)}
+    `;
   }
 
-  _loadTabOrder() {
-    try {
-      const saved = localStorage.getItem("pc_stats_tab_order");
-      if (saved) {
-        const ids = JSON.parse(saved);
-        const allIds = PcUserStatisticsPanel.ALL_TABS.map(t => t.id);
-        // Validate — only keep known ids, append any missing
-        const valid = ids.filter(id => allIds.includes(id));
-        allIds.forEach(id => { if (!valid.includes(id)) valid.push(id); });
-        return valid;
+  // ── Bar chart SVG ─────────────────────────────────────────────
+  _barChartSVG(days, users, series, metric) {
+    if (!days.length) return `<div class="empty-state small">Ingen historik data endnu</div>`;
+
+    const COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6"];
+    const W = 680, H = 200, PAD_L = 48, PAD_R = 12, PAD_T = 12, PAD_B = 36;
+    const chartW = W - PAD_L - PAD_R;
+    const chartH = H - PAD_T - PAD_B;
+
+    const showDays = days.slice(-30);
+    const barGroupW = chartW / showDays.length;
+    const barW = Math.max(Math.min(barGroupW / users.length - 2, 18), 3);
+
+    let maxVal = 0;
+    for (const day of showDays) {
+      for (const u of users) {
+        const v = series[u]?.[day]?.[metric] || 0;
+        if (v > maxVal) maxVal = v;
       }
-    } catch(e) {}
-    return PcUserStatisticsPanel.ALL_TABS.map(t => t.id);
-  }
-
-  _saveTabOrder(order) {
-    try { localStorage.setItem("pc_stats_tab_order", JSON.stringify(order)); } catch(e) {}
-    this._tabOrder = order;
-  }
-
-  _orderedTabs() {
-    const all = PcUserStatisticsPanel.ALL_TABS;
-    return this._tabOrder
-      .map(id => all.find(t => t.id === id))
-      .filter(Boolean);
-  }
-
-  // ── Config load/save ──────────────────────────────────────────
-  async _loadConfig() {
-    if (!this._hass) return;
-    try {
-      this._config = await this._hass.callWS({ type: "pc_user_statistics/get_config" });
-    } catch(e) {
-      console.error("Config load error:", e);
-      this._config = {};
     }
-    this._render();
-  }
+    if (maxVal === 0) return `<div class="empty-state small">Ingen data for valgt periode</div>`;
 
-  async _loadHaUsers() {
-    try {
-      const result = await this._hass.callWS({ type: "config/auth/list" });
-      this._haUsers = (result || []).map(u => ({ id: u.id, name: u.name }));
-      this._render();
-    } catch (e) {
-      console.warn("[PC Stats] Kunne ikke hente HA brugere:", e);
-    }
-  }
-
-  async _saveConfig() {
-    if (!this._hass || this._configSaving) return;
-    const root = this.shadowRoot;
-
-    // Collect sensor entity IDs
-    const getVal = cls => root.querySelector(cls)?.value?.trim() || "";
-    const payload = {
-      user_entity:         getVal(".cfg-user-entity"),
-      watt_entity:         getVal(".cfg-watt-entity"),
-      device_power_entity: getVal(".cfg-device-power-entity"),
-      price_entity:        getVal(".cfg-price-entity"),
-      user_mappings: {},
-      tracked_users: [],
+    const scale = v => chartH - (v / maxVal) * chartH;
+    const fmtY  = v => {
+      if (metric === "time")   return v >= 3600 ? (v/3600).toFixed(1)+"t" : Math.round(v/60)+"m";
+      if (metric === "energy") return v.toFixed(2)+"kWh";
+      return v.toFixed(1)+"kr";
     };
 
-    // Collect user rows
-    const rows = root.querySelectorAll(".user-mapping-row");
-    let valid = true;
-    rows.forEach(row => {
-      const sensorState = row.querySelector(".cfg-sensor-state")?.value?.trim();
-      const userId      = row.querySelector(".cfg-user-id")?.value?.trim().toLowerCase();
-      const haUser      = row.querySelector(".cfg-ha-user")?.value?.trim() || "";
-      if (sensorState && userId) {
-        // Store as object so we can include optional ha_user
-        payload.user_mappings[sensorState] = haUser
-          ? { user_id: userId, ha_user: haUser }
-          : userId; // backwards-compat: plain string if no HA user selected
-        if (!payload.tracked_users.includes(userId))
-          payload.tracked_users.push(userId);
-      } else if (sensorState || userId) {
-        valid = false; // partial row
-      }
-    });
+    const yLabels = [0,.25,.5,.75,1].map(f => {
+      const val = f * maxVal;
+      const y   = PAD_T + scale(val);
+      return `<text x="${PAD_L - 4}" y="${y + 4}" text-anchor="end" font-size="9" fill="var(--secondary-text-color)">${fmtY(val)}</text>
+              <line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="var(--divider)" stroke-width="1"/>`;
+    }).join("");
 
-    if (!valid) { alert("Alle bruger-rækker skal have både sensor-tilstand og bruger-ID"); return; }
-    if (!payload.tracked_users.length) { alert("Mindst én bruger skal konfigureres"); return; }
+    const bars = showDays.map((day, di) => {
+      const groupX = PAD_L + di * barGroupW;
+      const dayBars = users.map((u, ui) => {
+        const val  = series[u]?.[day]?.[metric] || 0;
+        const barH = (val / maxVal) * chartH;
+        const x    = groupX + (barGroupW - users.length * (barW + 2)) / 2 + ui * (barW + 2);
+        const y    = PAD_T + chartH - barH;
+        const col  = COLORS[ui % COLORS.length];
+        return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW}" height="${barH.toFixed(1)}"
+                  fill="${col}" rx="2" opacity="0.85">
+                  <title>${u}: ${fmtY(val)}</title>
+                </rect>`;
+      }).join("");
 
-    this._configSaving = true;
-    this._configState  = null;
-    this._render();
+      const step   = showDays.length > 20 ? 5 : showDays.length > 10 ? 3 : 1;
+      const xLabel = di % step === 0
+        ? `<text x="${(groupX + barGroupW/2).toFixed(1)}" y="${H - 4}"
+             text-anchor="middle" font-size="9" fill="var(--secondary-text-color)">${day.slice(5)}</text>`
+        : "";
 
-    try {
-      await this._hass.callWS({ type: "pc_user_statistics/save_config", ...payload });
-      this._configState  = "saved";
-      this._configSaving = false;
-      // Update local config cache
-      this._config = { ...this._config, ...payload };
-      this._render();
-      // Show success briefly, then note that HA will reload
-    } catch(e) {
-      console.error("Save config error:", e);
-      this._configState  = "error";
-      this._configSaving = false;
-      this._render();
-    }
+      return dayBars + xLabel;
+    }).join("");
+
+    const legend = users.map((u,i) =>
+      `<div class="legend-row"><span class="legend-dot" style="background:${COLORS[i%COLORS.length]}"></span><span class="legend-name">${u}</span></div>`
+    ).join("");
+
+    return `
+      <svg viewBox="0 0 ${W} ${H}" class="bar-chart-svg" preserveAspectRatio="xMidYMid meet">
+        ${yLabels}
+        ${bars}
+      </svg>
+      <div class="donut-legend bar-legend">${legend}</div>`;
+  }
+
+  // ── Week summary table ─────────────────────────────────────────
+  _weekSummaryHTML(days, users, series, metric) {
+    const last7 = days.slice(-7);
+    if (!last7.length) return "";
+
+    const fmtV = (v) => {
+      if (metric === "time")   return this._fmtTime(v);
+      if (metric === "energy") return this._fmtEnergy(v);
+      return this._fmtCost(v);
+    };
+
+    const COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6"];
+
+    const totals = users.map((u,i) => {
+      const tot = last7.reduce((acc, d) => acc + (series[u]?.[d]?.[metric]||0), 0);
+      return `
+        <div class="week-user-card">
+          <div class="avatar" style="background:${COLORS[i%COLORS.length]}">${u[0].toUpperCase()}</div>
+          <div class="week-user-info">
+            <div class="week-user-name">${u}</div>
+            <div class="week-user-val">${fmtV(tot)}</div>
+          </div>
+        </div>`;
+    }).join("");
+
+    const dayFmt = d => {
+      const dt = new Date(d+"T12:00:00Z");
+      return dt.toLocaleDateString("da-DK", { weekday:"short", day:"numeric", month:"numeric" });
+    };
+
+    const rows = last7.map(d => {
+      const cells = users.map((u,i) => {
+        const v = series[u]?.[d]?.[metric]||0;
+        const barPct = Math.round((v / (Math.max(...users.map(u2 => series[u2]?.[d]?.[metric]||0))||1)) * 100);
+        return `<td>
+          <div class="day-bar-bg"><div class="day-bar-fill" style="width:${barPct}%;background:${COLORS[i%COLORS.length]}"></div></div>
+          <div class="day-val">${fmtV(v)}</div>
+        </td>`;
+      }).join("");
+      return `<tr><td class="day-label">${dayFmt(d)}</td>${cells}</tr>`;
+    }).join("");
+
+    const headers = users.map(u => `<th>${u}</th>`).join("");
+
+    return `
+      <div class="week-cards">${totals}</div>
+      <table class="day-table">
+        <thead><tr><th>Dag</th>${headers}</tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
   }
 
   // ── Config tab HTML ───────────────────────────────────────────
@@ -877,11 +888,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     if (!this._config) return '<div class="empty-state">Indlæser konfiguration...</div>';
     const cfg = this._config;
 
-    // Build user mapping rows from current config
-    // user_mappings format supports both legacy string { sensorState: userId }
-    // and new object { sensorState: { user_id, ha_user } }
     const rawMappings = cfg.user_mappings || {};
-    // Normalize to [{sensorState, userId, haUser}]
     const mappings = Object.entries(rawMappings).map(([k, v]) => ({
       sensorState: k,
       userId:  typeof v === "object" ? (v.user_id || "") : (v || ""),
@@ -1013,170 +1020,7 @@ class PcUserStatisticsPanel extends HTMLElement {
       </div>`;
   }
 
-  // ── Bar chart SVG ─────────────────────────────────────────────
-  _barChartSVG(days, users, series, metric) {
-    if (!days.length) return `<div class="empty-state small">Ingen historik data endnu</div>`;
-
-    const COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6"];
-    const W = 680, H = 200, PAD_L = 48, PAD_R = 12, PAD_T = 12, PAD_B = 36;
-    const chartW = W - PAD_L - PAD_R;
-    const chartH = H - PAD_T - PAD_B;
-
-    // Only show last 30 days, max
-    const showDays = days.slice(-30);
-    const barGroupW = chartW / showDays.length;
-    const barW = Math.max(Math.min(barGroupW / users.length - 2, 18), 3);
-
-    // Find max value for scale
-    let maxVal = 0;
-    for (const day of showDays) {
-      for (const u of users) {
-        const v = series[u]?.[day]?.[metric] || 0;
-        if (v > maxVal) maxVal = v;
-      }
-    }
-    if (maxVal === 0) return `<div class="empty-state small">Ingen data for valgt periode</div>`;
-
-    const scale = v => chartH - (v / maxVal) * chartH;
-    const fmtY  = v => {
-      if (metric === "time")   return v >= 3600 ? (v/3600).toFixed(1)+"t" : Math.round(v/60)+"m";
-      if (metric === "energy") return v.toFixed(2)+"kWh";
-      return v.toFixed(1)+"kr";
-    };
-
-    // Y-axis labels (4 steps)
-    const yLabels = [0,.25,.5,.75,1].map(f => {
-      const val = f * maxVal;
-      const y   = PAD_T + scale(val);
-      return `<text x="${PAD_L - 4}" y="${y + 4}" text-anchor="end" font-size="9" fill="var(--secondary-text-color)">${fmtY(val)}</text>
-              <line x1="${PAD_L}" y1="${y}" x2="${W - PAD_R}" y2="${y}" stroke="var(--divider)" stroke-width="1"/>`;
-    }).join("");
-
-    // Bars
-    const bars = showDays.map((day, di) => {
-      const groupX = PAD_L + di * barGroupW;
-      const bars   = users.map((u, ui) => {
-        const val  = series[u]?.[day]?.[metric] || 0;
-        const barH = (val / maxVal) * chartH;
-        const x    = groupX + (barGroupW - users.length * (barW + 2)) / 2 + ui * (barW + 2);
-        const y    = PAD_T + chartH - barH;
-        const col  = COLORS[ui % COLORS.length];
-        return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW}" height="${barH.toFixed(1)}"
-                  fill="${col}" rx="2" opacity="0.85">
-                  <title>${u}: ${fmtY(val)}</title>
-                </rect>`;
-      }).join("");
-
-      // X label — only show every N days to avoid crowding
-      const step   = showDays.length > 20 ? 5 : showDays.length > 10 ? 3 : 1;
-      const xLabel = di % step === 0
-        ? `<text x="${(groupX + barGroupW/2).toFixed(1)}" y="${H - 4}"
-             text-anchor="middle" font-size="9" fill="var(--secondary-text-color)">${day.slice(5)}</text>`
-        : "";
-
-      return bars + xLabel;
-    }).join("");
-
-    // Legend
-    const legend = users.map((u,i) =>
-      `<div class="legend-row"><span class="legend-dot" style="background:${COLORS[i%COLORS.length]}"></span><span class="legend-name">${u}</span></div>`
-    ).join("");
-
-    return `
-      <svg viewBox="0 0 ${W} ${H}" class="bar-chart-svg" preserveAspectRatio="xMidYMid meet">
-        ${yLabels}
-        ${bars}
-      </svg>
-      <div class="donut-legend bar-legend">${legend}</div>`;
-  }
-
-  // ── Week summary table ─────────────────────────────────────────
-  _weekSummaryHTML(days, users, series, metric) {
-    const last7 = days.slice(-7);
-    if (!last7.length) return "";
-
-    const fmtV = (v) => {
-      if (metric === "time")   return this._fmtTime(v);
-      if (metric === "energy") return this._fmtEnergy(v);
-      return this._fmtCost(v);
-    };
-
-    const COLORS = ["#6366f1","#f59e0b","#10b981","#ef4444","#8b5cf6"];
-
-    // Total per user last 7 days
-    const totals = users.map((u,i) => {
-      const tot = last7.reduce((acc, d) => acc + (series[u]?.[d]?.[metric]||0), 0);
-      return `
-        <div class="week-user-card">
-          <div class="avatar" style="background:${COLORS[i%COLORS.length]}">${u[0].toUpperCase()}</div>
-          <div class="week-user-info">
-            <div class="week-user-name">${u}</div>
-            <div class="week-user-val">${fmtV(tot)}</div>
-          </div>
-        </div>`;
-    }).join("");
-
-    // Daily breakdown table
-    const dayFmt = d => {
-      const dt = new Date(d+"T12:00:00Z");
-      return dt.toLocaleDateString("da-DK", { weekday:"short", day:"numeric", month:"numeric" });
-    };
-
-    const rows = last7.map(d => {
-      const cells = users.map((u,i) => {
-        const v = series[u]?.[d]?.[metric]||0;
-        const barPct = Math.round((v / (Math.max(...users.map(u2 => series[u2]?.[d]?.[metric]||0))||1)) * 100);
-        return `<td>
-          <div class="day-bar-bg"><div class="day-bar-fill" style="width:${barPct}%;background:${COLORS[i%COLORS.length]}"></div></div>
-          <div class="day-val">${fmtV(v)}</div>
-        </td>`;
-      }).join("");
-      return `<tr><td class="day-label">${dayFmt(d)}</td>${cells}</tr>`;
-    }).join("");
-
-    const headers = users.map(u => `<th>${u}</th>`).join("");
-
-    return `
-      <div class="week-cards">${totals}</div>
-      <table class="day-table">
-        <thead><tr><th>Dag</th>${headers}</tr></thead>
-        <tbody>${rows}</tbody>
-      </table>`;
-  }
-
-  // ── History tab ────────────────────────────────────────────────
-  _historyHTML() {
-    if (!this._history) {
-      return `<div class="empty-state">Indlæser historik fra InfluxDB...</div>`;
-    }
-
-    const { days, users, series } = this._history;
-    const m = this._histMetric;
-
-    const metricBtns = [
-      ["time",   "⏱️ Tid"],
-      ["energy", "⚡ Energi"],
-      ["cost",   "💰 Pris"],
-    ].map(([id, label]) =>
-      `<button class="metric-btn${m===id?" active":""}" data-metric="${id}">${label}</button>`
-    ).join("");
-
-    return `
-      <div class="hist-toolbar">
-        <div class="metric-selector">${metricBtns}</div>
-        <button class="reload-hist-btn">🔄 Opdater</button>
-      </div>
-
-      <div class="section-title">Daglig fordeling — seneste 30 dage</div>
-      <div class="bar-chart-wrap">
-        ${this._barChartSVG(days, users, series, m)}
-      </div>
-
-      <div class="section-title">Seneste 7 dage</div>
-      ${this._weekSummaryHTML(days, users, series, m)}
-    `;
-  }
-
+  // ── Admin tab HTML ────────────────────────────────────────────
   _adminHTML() {
     const sys = this._system;
     if (!sys) return `<div class="empty-state">Indlæser...</div>`;
@@ -1220,7 +1064,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     if      (this._tab==="statistics")    content = this._statisticsHTML();
     else if (this._tab==="users")         content = this._usersHTML();
     else if (this._tab==="notifications") content = this._notificationsHTML();
-    else if (this._tab==="history")        content = this._historyHTML();
+    else if (this._tab==="history")       content = this._historyHTML();
     else if (this._tab==="config")        content = this._configHTML();
     else if (this._tab==="admin")         content = this._adminHTML();
 
@@ -1235,117 +1079,319 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._bind();
   }
 
+  // ── Event delegation ──────────────────────────────────────────
+  _bind() {
+    const root = this.shadowRoot;
+
+    // Tabs
+    root.querySelectorAll(".tab").forEach(el => {
+      el.addEventListener("click", () => {
+        this._tab = el.dataset.tab;
+        this._render();
+        if (el.dataset.tab === "history" && !this._history) this._loadHistory();
+        if (el.dataset.tab === "config"  && !this._config)  this._loadConfig();
+        if (el.dataset.tab === "config"  && !this._haUsers.length) this._loadHaUsers();
+      });
+    });
+
+    // Refresh
+    root.querySelector(".refresh-btn")?.addEventListener("click", () => this._load());
+
+    // Hamburger
+    root.querySelector(".menu-btn")?.addEventListener("click", () => {
+      this.dispatchEvent(new Event("hass-toggle-menu",{bubbles:true,composed:true}));
+    });
+
+    if (this._tab === "config" && this._config) {
+      root.querySelector(".cfg-save-btn")?.addEventListener("click", () => this._saveConfig());
+      root.querySelector(".cfg-cancel-btn")?.addEventListener("click", () => {
+        this._config = null; this._configState = null; this._loadConfig();
+      });
+
+      const sorter = root.querySelector("#tab-sorter");
+      if (sorter) {
+        let dragIdx = null;
+        sorter.querySelectorAll(".tab-sort-item").forEach(el => {
+          el.addEventListener("dragstart", e => {
+            dragIdx = parseInt(el.dataset.idx);
+            el.classList.add("dragging");
+            e.dataTransfer.effectAllowed = "move";
+          });
+          el.addEventListener("dragend", () => {
+            el.classList.remove("dragging");
+            sorter.querySelectorAll(".tab-sort-item").forEach(x => x.classList.remove("drag-over"));
+          });
+          el.addEventListener("dragover", e => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = "move";
+            sorter.querySelectorAll(".tab-sort-item").forEach(x => x.classList.remove("drag-over"));
+            el.classList.add("drag-over");
+          });
+          el.addEventListener("drop", e => {
+            e.preventDefault();
+            const targetIdx = parseInt(el.dataset.idx);
+            if (dragIdx === null || dragIdx === targetIdx) return;
+            const newOrder = [...this._tabOrder];
+            const [moved]  = newOrder.splice(dragIdx, 1);
+            newOrder.splice(targetIdx, 0, moved);
+            this._saveTabOrder(newOrder);
+            this._render();
+          });
+        });
+      }
+
+      root.querySelector(".reset-tabs-btn")?.addEventListener("click", () => {
+        this._saveTabOrder(PcUserStatisticsPanel.ALL_TABS.map(t => t.id));
+        this._render();
+      });
+
+      root.querySelector(".add-mapping-btn")?.addEventListener("click", () => {
+        const updated = { ...this._config.user_mappings };
+        updated[""] = { user_id: "", ha_user: "" };
+        this._config = { ...this._config, user_mappings: updated };
+        this._render();
+      });
+      root.querySelectorAll(".remove-row-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const idx     = parseInt(btn.dataset.idx);
+          const entries = Object.entries(this._config.user_mappings || {});
+          entries.splice(idx, 1);
+          this._config = { ...this._config, user_mappings: Object.fromEntries(entries) };
+          this._render();
+        });
+      });
+    }
+
+    if (this._tab === "history") {
+      root.querySelectorAll(".metric-btn").forEach(el => {
+        el.addEventListener("click", () => { this._histMetric = el.dataset.metric; this._render(); });
+      });
+      root.querySelector(".reload-hist-btn")?.addEventListener("click", () => {
+        this._history = null; this._render(); this._loadHistory();
+      });
+    }
+
+    if (this._tab === "notifications" && this._notif) {
+      root.querySelectorAll(".dev-check").forEach(el => {
+        el.addEventListener("change", () => {
+          const devs = [...root.querySelectorAll(".dev-check")]
+            .filter(c=>c.checked).map(c=>c.value);
+          this._saveDevices(devs);
+        });
+      });
+
+      root.querySelectorAll(".rule-toggle").forEach(el => {
+        el.addEventListener("change", () => this._toggleRule(el.dataset.rule));
+      });
+
+      root.querySelectorAll(".edit-btn").forEach(el => {
+        el.addEventListener("click", () => {
+          const id = el.dataset.rule;
+          if (this._editingRule === id) {
+            this._editingRule = null;
+          } else {
+            this._editingRule = id;
+            this._newRule = { ...this._notif.rules[id], id };
+          }
+          this._render();
+        });
+      });
+
+      root.querySelectorAll(".test-btn").forEach(el => {
+        el.addEventListener("click", () => this._testRule(el.dataset.rule));
+      });
+
+      root.querySelectorAll(".del-btn").forEach(el => {
+        el.addEventListener("click", () => this._deleteRule(el.dataset.rule));
+      });
+
+      root.querySelector(".save-edit-btn")?.addEventListener("click", () => {
+        const r = this._collectForm("edit-form");
+        if (r) this._saveRule(this._editingRule, { ...this._notif.rules[this._editingRule], ...r });
+      });
+      root.querySelector(".cancel-edit-btn")?.addEventListener("click", () => {
+        this._editingRule = null; this._render();
+      });
+
+      root.querySelector(".show-create-btn")?.addEventListener("click", () => {
+        this._showCreate = !this._showCreate;
+        this._editingRule = null;
+        this._render();
+      });
+      root.querySelector(".save-new-btn")?.addEventListener("click", () => {
+        const r = this._collectForm("create-form");
+        if (!r) return;
+        const id = `custom_${Date.now()}`;
+        this._saveRule(id, { ...r, id, enabled:false, is_custom:true });
+      });
+      root.querySelector(".cancel-new-btn")?.addEventListener("click", () => {
+        this._showCreate = false; this._newRule = this._emptyRule(); this._render();
+      });
+    }
+  }
+
+  _collectForm(formClass) {
+    const root = this.shadowRoot;
+    const f = root.querySelector(`.${formClass}`);
+    if (!f) return null;
+    const name = f.querySelector(".f-name")?.value?.trim();
+    if (!name) { alert("Giv reglen et navn"); return null; }
+    const targets = [...f.querySelectorAll(".f-user:checked")].map(el=>el.value);
+    return {
+      name,
+      icon:             f.querySelector(".f-icon")?.value || "🔔",
+      trigger_type:     f.querySelector(".f-ttype")?.value || "session_minutes",
+      trigger_value:    parseFloat(f.querySelector(".f-tval")?.value) || 60,
+      title:            f.querySelector(".f-title")?.value || "",
+      message:          f.querySelector(".f-msg")?.value || "",
+      repeat:           f.querySelector(".f-repeat")?.checked || false,
+      repeat_interval:  parseFloat(f.querySelector(".f-interval")?.value) || 60,
+      user_targets:     targets,
+    };
+  }
+
   // ── CSS ───────────────────────────────────────────────────────
   _css() {
-    // Use HA theme CSS custom properties directly — works with ANY active HA theme.
-    // Shadow DOM inherits custom properties from :root automatically.
     return `
     :host {
-      --bg:      var(--primary-background-color, #111827);
-      --card:    var(--card-background-color, #1f2937);
-      --card2:   var(--secondary-background-color, #374151);
-      --text:    var(--primary-text-color, #f9fafb);
-      --subtext: var(--secondary-text-color, #9ca3af);
-      --divider: var(--divider-color, #374151);
-      --accent:  var(--accent-color, var(--primary-color, #6366f1));
-      display: flex;
-      flex-direction: column;
-      width: 100%;
-      height: 100%;
-      padding: 16px;
-      box-sizing: border-box;
-      overflow-y: auto;
+      display: block;
+      --accent:   var(--primary-color, #6366f1);
+      --text:     var(--primary-text-color, #1f2937);
+      --subtext:  var(--secondary-text-color, #6b7280);
+      --card:     var(--card-background-color, #ffffff);
+      --card2:    var(--secondary-background-color, #f3f4f6);
+      --divider:  var(--divider-color, #e5e7eb);
       font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
+      font-size: 14px;
       color: var(--text);
-      background: var(--bg);
     }
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
-    .panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    /* ── Panel layout ── */
+    .panel { display:flex; flex-direction:column; height:100%; min-height:0; }
+    .tab-content { flex:1; overflow-y:auto; padding:16px; }
 
-    /* Header */
+    /* ── Header ── */
     .header { display:flex; align-items:center; justify-content:space-between;
-      background:var(--accent); color:white; padding:16px 20px; border-radius:16px 16px 0 0; }
-    .header-left { display:flex; align-items:center; gap:12px; }
-    .header-title { display:flex; align-items:center; gap:12px; }
-    .icon { font-size:28px; }
-    .title { font-size:20px; font-weight:700; }
-    .subtitle { font-size:13px; opacity:.85; display:flex; align-items:center; gap:6px; }
-    .live-dot { display:inline-block; width:8px; height:8px; border-radius:50%;
-      background:#4ade80; animation:pulse 2s infinite; }
-    @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.5;transform:scale(1.3)} }
-    .menu-btn,.refresh-btn { width:36px; height:36px; border:none; border-radius:8px;
-      background:rgba(255,255,255,.15); color:white; cursor:pointer;
-      display:flex; align-items:center; justify-content:center; }
-    .menu-btn:hover,.refresh-btn:hover { background:rgba(255,255,255,.25); }
-    .menu-btn svg,.refresh-btn svg { width:20px; height:20px; fill:white; }
+      padding:14px 16px; background:var(--card2); border-bottom:1px solid var(--divider);
+      gap:12px; transition:background .3s; }
+    .header-live { background:linear-gradient(135deg,#6366f1 0%,#8b5cf6 100%); color:white; }
+    .header-live .title, .header-live .subtitle { color:white; }
+    .header-live .subtext { color:rgba(255,255,255,0.8); }
+    .header-left { display:flex; align-items:center; gap:10px; flex:1; min-width:0; }
+    .header-right { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+    .header-title { display:flex; align-items:center; gap:10px; min-width:0; }
+    .title    { font-size:16px; font-weight:700; white-space:nowrap; }
+    .subtitle { font-size:12px; color:var(--subtext); display:flex; align-items:center; gap:5px; }
+    .header-live .subtitle { color:rgba(255,255,255,0.85); }
 
-    /* Tabs */
-    .tabs { display:flex; background:var(--card);
-      border-bottom:2px solid var(--divider); }
-    .tab { flex:1; padding:12px 8px; border:none; background:transparent;
-      color:var(--subtext); cursor:pointer; display:flex;
-      flex-direction:column; align-items:center; gap:3px;
-      border-bottom:2px solid transparent; margin-bottom:-2px; transition:color .15s,border-color .15s; }
+    /* ── Live dot ── */
+    .live-dot { display:inline-block; width:7px; height:7px; border-radius:50%;
+      background:#4ade80; box-shadow:0 0 6px #4ade80; animation:blink 1.4s infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    /* ── Pulse ring ── */
+    .pulse-ring-wrap { position:relative; display:inline-flex; align-items:center; justify-content:center; }
+    .pulse-ring { position:absolute; width:36px; height:36px; border-radius:50%;
+      border:2px solid rgba(255,255,255,0.5); animation:sonar 2s ease-out infinite; }
+    .pulse-ring-2 { animation-delay:1s; }
+    @keyframes sonar { 0%{transform:scale(1);opacity:0.8} 100%{transform:scale(2.2);opacity:0} }
+    .icon { font-size:24px; position:relative; z-index:1; }
+
+    /* ── Watt gauge ── */
+    .watt-gauge { display:flex; flex-direction:column; align-items:center; position:relative; }
+    .gauge-svg { width:68px; height:40px; }
+    .watt-center { position:absolute; bottom:0; left:50%; transform:translateX(-50%); text-align:center; }
+    .watt-value { font-size:11px; font-weight:700; color:white; white-space:nowrap; }
+
+    /* ── Buttons ── */
+    .refresh-btn, .menu-btn { background:rgba(255,255,255,0.15); border:none; border-radius:8px;
+      width:36px; height:36px; cursor:pointer; display:flex; align-items:center; justify-content:center;
+      color:white; transition:background .15s; }
+    .refresh-btn:hover, .menu-btn:hover { background:rgba(255,255,255,0.25); }
+    .refresh-btn svg, .menu-btn svg { width:20px; height:20px; fill:currentColor; }
+    .header:not(.header-live) .refresh-btn, .header:not(.header-live) .menu-btn {
+      background:var(--card); color:var(--subtext); border:1px solid var(--divider); }
+
+    .save-btn { padding:10px 20px; background:var(--accent); color:white;
+      border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer;
+      transition:opacity .15s; }
+    .save-btn:hover { opacity:.88; }
+    .save-btn:disabled { opacity:.5; cursor:not-allowed; }
+    .cancel-btn { padding:10px 20px; background:transparent; color:var(--subtext);
+      border:1px solid var(--divider); border-radius:10px; font-size:14px; cursor:pointer; }
+    .add-btn { padding:6px 14px; background:var(--accent); color:white;
+      border:none; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; }
+
+    /* ── Tabs ── */
+    .tabs { display:flex; overflow-x:auto; border-bottom:1px solid var(--divider);
+      background:var(--card); scrollbar-width:none; justify-content:center; }
+    .tabs::-webkit-scrollbar { display:none; }
+    .tab { display:flex; flex-direction:column; align-items:center; gap:5px;
+      padding:14px 20px; border:none; background:transparent; cursor:pointer;
+      color:var(--subtext); font-size:11px; border-bottom:2px solid transparent;
+      transition:color .15s, border-color .15s; white-space:nowrap; flex-shrink:0; }
     .tab:hover { color:var(--accent); }
     .tab.active { color:var(--accent); border-bottom-color:var(--accent); font-weight:600; }
-    .tab-icon { font-size:18px; }
-    .tab-label { font-size:12px; }
+    .tab-icon { font-size:30px; }
+    .tab-label { font-size:10px; }
+    @media (max-width:600px) { .tab-label { display:none; } .tab { padding:12px 14px; } }
 
-    /* Tab content */
-    .tab-content { background:var(--card); border-radius:0 0 16px 16px;
-      padding:20px; flex:1; min-height:0; overflow-y:auto; }
-
-    .section-title { font-size:12px; font-weight:600; text-transform:uppercase;
+    /* ── Section titles ── */
+    .section-title { font-size:11px; font-weight:700; text-transform:uppercase;
       letter-spacing:.8px; color:var(--subtext); margin:20px 0 10px; }
     .section-title:first-child { margin-top:0; }
     .section-title-row { display:flex; align-items:center; justify-content:space-between; margin:20px 0 10px; }
 
-    /* Stat cards */
+    /* ── Avatar ── */
+    .avatar { width:36px; height:36px; border-radius:50%; display:flex; align-items:center;
+      justify-content:center; font-weight:700; font-size:15px; color:white; flex-shrink:0; }
+    .avatar.large { width:48px; height:48px; font-size:20px; }
 
-    /* ── Dark theme transitions ── */
-    * { transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease; }
+    /* ── Stat grid ── */
+    .stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; flex:1; min-width:0; }
+    .session-donut-row { display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
+    .session-donut-row .stat-grid { flex:1; min-width:0; }
+    .stat-card { background:var(--card2); border-radius:12px;
+      padding:16px; text-align:center; border:2px solid transparent; }
+    .stat-card.active { border-color:var(--accent);
+      background:color-mix(in srgb,var(--accent) 8%,var(--secondary-background-color,#f3f4f6)); }
+    .stat-icon  { font-size:22px; margin-bottom:6px; }
+    .stat-value { font-size:20px; font-weight:700; }
+    .stat-label { font-size:11px; color:var(--subtext); margin-top:2px; }
 
-    /* ── Header upgrades ── */
-    .header-live {
-      background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #6366f1 100%);
-      box-shadow: 0 4px 24px rgba(99,102,241,0.4);
-    }
-    .header-right { display:flex; align-items:center; gap:10px; }
+    /* ── Monthly ── */
+    .donut-wrapper { flex-shrink:0; align-self:center; }
+    .user-monthly-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
+    .user-month-card { background:var(--card2); border-radius:12px; padding:16px; }
+    .user-month-header { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+    .user-month-name { font-weight:600; text-transform:capitalize; }
+    .user-month-stats { display:flex; flex-direction:column; gap:8px; }
+    .user-stat { display:flex; justify-content:space-between; font-size:13px; }
+    .user-stat-label { color:var(--subtext); }
+    .user-stat-value { font-weight:600; }
 
-    /* ── Pulse ring animation ── */
-    .pulse-ring-wrap { position:relative; display:inline-flex; align-items:center; justify-content:center;
-      width:44px; height:44px; flex-shrink:0; }
-    .pulse-ring { position:absolute; inset:0; border-radius:50%;
-      border:2px solid rgba(74,222,128,0.6);
-      animation: pulse-out 2s ease-out infinite; }
-    .pulse-ring-2 { animation-delay: 1s; border-color:rgba(74,222,128,0.3); }
-    .pulse-ring-wrap .icon { font-size:22px; position:relative; z-index:1; }
-    @keyframes pulse-out {
-      0%   { transform:scale(0.8); opacity:1; }
-      70%  { transform:scale(1.6); opacity:0; }
-      100% { transform:scale(0.8); opacity:0; }
-    }
-
-    /* ── Watt gauge ── */
-    .watt-gauge { position:relative; width:68px; height:44px; }
-    .gauge-svg { width:68px; height:44px; display:block; }
-    .watt-center { position:absolute; bottom:2px; left:50%; transform:translateX(-50%);
-      text-align:center; white-space:nowrap; }
-    .watt-value { font-size:13px; font-weight:800; color:white; line-height:1; }
+    /* ── Donut ── */
+    .donut-container { width:160px; display:flex; flex-direction:column; align-items:center; gap:10px; position:relative; }
+    .donut-ring { position:relative; }
+    .donut-svg { width:140px; height:140px; display:block; }
+    .donut-center { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; width:80px; }
+    .donut-top-user { font-size:12px; font-weight:700; text-transform:capitalize; }
+    .donut-top-pct  { font-size:18px; font-weight:800; }
+    .donut-center-label { font-size:11px; color:var(--subtext); }
+    .donut-legend { display:flex; flex-direction:column; gap:6px; width:100%; }
+    .legend-row { display:flex; align-items:center; gap:6px; font-size:12px; }
+    .legend-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+    .legend-name { flex:1; text-transform:capitalize; }
+    .legend-pct { color:var(--subtext); font-size:11px; }
 
     /* ── Leaderboard ── */
     .leaderboard { display:flex; flex-direction:column; gap:8px; }
-    .lb-row { display:grid; grid-template-columns:32px 36px 1fr auto;
-      align-items:center; gap:12px;
-      background:var(--card2); border-radius:12px;
-      padding:12px 14px; border:2px solid transparent;
-      transition:transform 0.15s, box-shadow 0.15s; }
-    .lb-row:hover { transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,0,0,0.1); }
-    .lb-first { background:linear-gradient(135deg,
-      color-mix(in srgb,#f59e0b 12%,var(--card2)) 0%,
-      color-mix(in srgb,#f59e0b 4%,var(--card2)) 100%);
-      border-color:color-mix(in srgb,#f59e0b 40%,transparent); }
+    .lb-row { display:flex; align-items:center; gap:12px;
+      background:var(--card2); border-radius:12px; padding:12px 16px;
+      border:2px solid transparent; }
+    .lb-first { border-color:color-mix(in srgb,#f59e0b 60%,transparent);
+      background:color-mix(in srgb,#f59e0b 6%,var(--card2)); }
     .lb-rank { font-size:20px; text-align:center; }
     .lb-avatar { width:36px; height:36px; border-radius:50%; display:flex; align-items:center;
       justify-content:center; font-weight:700; font-size:15px; color:white; }
@@ -1357,79 +1403,33 @@ class PcUserStatisticsPanel extends HTMLElement {
     .lb-time { font-size:14px; font-weight:700; color:var(--text); }
     .lb-cost { font-size:11px; color:var(--subtext); margin-top:1px; }
 
-    .stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; flex:1; min-width:0; }
-    .session-donut-row { display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
-    .stat-card { background:var(--card2); border-radius:12px;
-      padding:16px; text-align:center; border:2px solid transparent; }
-    .stat-card.active { border-color:var(--accent);
-      background:color-mix(in srgb,var(--accent) 8%,var(--secondary-background-color,#f3f4f6)); }
-    .stat-icon { font-size:22px; margin-bottom:6px; }
-    .stat-value { font-size:20px; font-weight:700; }
-    .stat-label { font-size:11px; color:var(--subtext); margin-top:2px; }
-
-    /* Monthly layout */
-    .monthly-layout { display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
-    .donut-wrapper { flex-shrink:0; align-self:center; }
-    .user-monthly-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
-    .user-month-card { background:var(--card2); border-radius:12px; padding:16px; }
-    .user-month-header { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
-    .user-month-name { font-weight:600; text-transform:capitalize; }
-    .user-month-stats { display:flex; flex-direction:column; gap:8px; }
-    .user-stat { display:flex; justify-content:space-between; font-size:13px; }
-    .user-stat-label { color:var(--subtext); }
-    .user-stat-value { font-weight:600; }
-
-    /* Donut */
-    .donut-container { width:160px; display:flex; flex-direction:column; align-items:center; gap:10px; position:relative; }
-    .donut-ring { position:relative; }
-    .donut-svg { width:140px; height:140px; display:block; }
-    .donut-center { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; width:80px; }
-    .donut-center-label { font-size:11px; color:var(--subtext); }
-    .donut-top-user { font-size:13px; font-weight:700; text-transform:capitalize; white-space:nowrap; }
-    .donut-top-pct { font-size:20px; font-weight:800; color:var(--text); line-height:1.1; }
-    .donut-legend { width:100%; display:flex; flex-direction:column; gap:5px; }
-    .legend-row { display:flex; align-items:center; gap:7px; font-size:12px; }
-    .legend-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
-    .legend-name { flex:1; text-transform:capitalize; }
-    .legend-pct { font-weight:600; color:var(--subtext); }
-
-    /* Avatar */
-    .avatar { width:36px; height:36px; border-radius:50%; display:flex; align-items:center;
-      justify-content:center; font-weight:700; font-size:15px; color:white; flex-shrink:0; }
-    .avatar.large { width:52px; height:52px; font-size:22px; }
-
-    /* Users */
-    .active-user-card { display:flex; align-items:center; gap:16px;
-      background:color-mix(in srgb,var(--accent) 8%,var(--card-background-color,#fff));
-      border:2px solid var(--accent); border-radius:14px; padding:16px; margin-bottom:4px; }
+    /* ── Users tab ── */
+    .active-user-card { display:flex; align-items:center; gap:14px;
+      background:color-mix(in srgb,var(--accent) 8%,var(--card2));
+      border:2px solid var(--accent); border-radius:14px; padding:16px; margin-bottom:8px; }
     .active-user-info { flex:1; }
-    .active-user-name { font-size:18px; font-weight:700; text-transform:capitalize; }
-    .active-user-meta { font-size:13px; color:var(--subtext); margin-top:2px; }
+    .active-user-name { font-size:16px; font-weight:700; text-transform:capitalize; }
+    .active-user-meta { font-size:12px; color:var(--subtext); margin-top:3px; }
+    .live-badge { background:var(--accent); color:white; font-size:10px; font-weight:700;
+      padding:3px 8px; border-radius:20px; letter-spacing:.5px; }
+    .live-badge.small { font-size:9px; padding:2px 6px; }
+    .offline-badge { font-size:11px; color:var(--subtext); }
     .users-list { display:flex; flex-direction:column; gap:8px; }
-    .user-row { display:flex; align-items:center; gap:14px;
-      background:var(--card2); border-radius:10px;
-      padding:12px 14px; border:2px solid transparent; }
-    .user-row.is-active { border-color:var(--accent); }
+    .user-row { display:flex; align-items:center; gap:12px;
+      background:var(--card2); border-radius:12px; padding:12px 16px; }
+    .user-row.is-active { border:2px solid var(--accent); }
     .user-row-info { flex:1; }
     .user-row-name { font-weight:600; text-transform:capitalize; }
     .user-row-mapping { font-size:12px; color:var(--subtext); margin-top:2px; }
-    code { background:var(--code-editor-background-color,#1e1e1e); color:var(--accent);
-      padding:2px 6px; border-radius:4px; font-size:11px; }
-    .live-badge { background:#10b981; color:white; font-size:10px; font-weight:700;
-      padding:3px 8px; border-radius:20px; }
-    .live-badge.small { font-size:9px; padding:2px 6px; }
-    .offline-badge { background:var(--secondary-background-color,#e5e7eb);
-      color:var(--subtext); font-size:10px; padding:3px 8px; border-radius:20px; }
 
-    /* Notifications */
-    .device-section { background:var(--card2); border-radius:12px; padding:14px 16px; }
-    .device-list { display:flex; flex-direction:column; gap:8px; }
-    .device-row { display:flex; align-items:center; gap:10px; cursor:pointer; font-size:14px; }
+    /* ── Notifications ── */
+    .device-section { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
+    .device-row { display:flex; align-items:center; gap:10px;
+      background:var(--card2); border-radius:10px; padding:10px 14px; cursor:pointer; }
     .device-name { flex:1; font-weight:500; }
     .device-service { font-size:11px; color:var(--subtext); }
     .device-hint { margin-top:10px; font-size:12px; color:#10b981; }
     .device-hint.warn { color:#f59e0b; }
-
     .rules-list { display:flex; flex-direction:column; gap:10px; margin-bottom:8px; }
     .rule-card { background:var(--card2); border-radius:12px;
       padding:14px 16px; border:2px solid transparent; transition:border-color .2s; }
@@ -1461,42 +1461,36 @@ class PcUserStatisticsPanel extends HTMLElement {
       background:color-mix(in srgb,#ef4444 15%,transparent); color:#ef4444; font-size:12px; cursor:pointer; font-weight:600; }
     .inline-edit { margin-top:14px; padding-top:14px; border-top:1px solid var(--divider); }
 
-    /* Toggle */
+    /* ── Toggle ── */
     .toggle { position:relative; display:inline-flex; align-items:center; cursor:pointer; flex-shrink:0; }
     .toggle input { opacity:0; width:0; height:0; position:absolute; }
-    .toggle-slider { width:44px; height:24px; background:var(--divider);
-      border-radius:12px; transition:background .2s; position:relative; }
-    .toggle-slider::after { content:""; position:absolute; top:3px; left:3px; width:18px; height:18px;
-      background:white; border-radius:50%; transition:transform .2s; box-shadow:0 1px 3px rgba(0,0,0,.2); }
+    .toggle-slider { width:42px; height:24px; background:var(--divider); border-radius:12px;
+      transition:background .2s; position:relative; }
+    .toggle-slider::after { content:""; position:absolute; left:3px; top:3px;
+      width:18px; height:18px; border-radius:50%; background:white;
+      transition:transform .2s; box-shadow:0 1px 3px rgba(0,0,0,.2); }
     .toggle input:checked + .toggle-slider { background:var(--accent); }
-    .toggle input:checked + .toggle-slider::after { transform:translateX(20px); }
+    .toggle input:checked + .toggle-slider::after { transform:translateX(18px); }
 
-    /* Forms */
-    .add-btn { padding:6px 14px; border:2px solid var(--accent); border-radius:8px;
-      background:transparent; color:var(--accent); font-size:13px; font-weight:600; cursor:pointer; }
-    .create-form { background:var(--card2); border-radius:12px;
-      padding:16px; margin-bottom:12px; border:2px dashed var(--accent); }
-    .form-row { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    .form-row label:first-child { width:110px; flex-shrink:0; font-size:13px; font-weight:500; color:var(--subtext); }
-    .form-row input[type=text],.form-row input[type=number],.form-row select {
-      flex:1; padding:7px 10px; border:1px solid var(--divider); border-radius:8px;
+    /* ── Notification form ── */
+    .create-form, .edit-form, .create-form-inner { padding-top:12px; }
+    .form-row { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+    .form-row label { font-size:12px; font-weight:600; color:var(--subtext); min-width:100px; flex-shrink:0; }
+    .form-row input[type=text], .form-row input[type=number], .form-row select {
+      flex:1; padding:8px 10px; border:1px solid var(--divider); border-radius:8px;
       background:var(--card); color:var(--text); font-size:13px; }
+    .form-row input:focus, .form-row select:focus { outline:none; border-color:var(--accent); }
     .user-checkboxes { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
     .user-check { display:flex; align-items:center; gap:4px; font-size:13px; cursor:pointer; }
-    .form-hint { font-size:11px; color:var(--subtext); }
-    .form-actions { display:flex; gap:8px; margin-top:12px; }
-    .save-btn { padding:8px 18px; border:none; border-radius:8px;
-      background:var(--accent); color:white; font-size:13px; font-weight:600; cursor:pointer; }
-    .save-btn:disabled { opacity:.6; cursor:not-allowed; }
-    .cancel-btn { padding:8px 18px; border:1px solid var(--divider); border-radius:8px;
-      background:transparent; color:var(--subtext); font-size:13px; cursor:pointer; }
+    .form-hint { font-size:11px; color:var(--subtext); margin-left:4px; }
+    .form-actions { display:flex; gap:8px; margin-top:14px; }
 
-    /* Admin */
-    .admin-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; }
+    /* ── Admin ── */
+    .admin-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; margin-bottom:4px; }
     .admin-card { background:var(--card2); border-radius:10px; padding:14px; }
-    .admin-card-label { font-size:11px; color:var(--subtext); margin-bottom:4px; text-transform:uppercase; letter-spacing:.5px; }
+    .admin-card-label { font-size:11px; color:var(--subtext); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
     .admin-card-value { font-size:14px; font-weight:600; word-break:break-all; }
-    .buffer-card { background:var(--card2); border-radius:12px; padding:16px; }
+    .buffer-card { background:var(--card2); border-radius:12px; padding:16px; margin-bottom:4px; }
     .buffer-header { display:flex; justify-content:space-between; font-size:14px; margin-bottom:10px; }
     .buffer-bar-bg { height:8px; background:var(--divider); border-radius:4px; overflow:hidden; }
     .buffer-bar-fill { height:100%; border-radius:4px; transition:width .4s ease; }
@@ -1513,39 +1507,22 @@ class PcUserStatisticsPanel extends HTMLElement {
       border-left:3px solid var(--accent); border-radius:0 8px 8px 0;
       font-size:13px; color:var(--subtext); line-height:1.5; }
 
-
-
-
     /* ── Tab sorter ── */
     .tab-sorter { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
-
-    .tab-sort-item {
-      display:flex; align-items:center; gap:12px;
-      background:var(--card2); border-radius:10px;
-      padding:11px 14px; cursor:grab;
-      border:2px solid transparent;
-      transition:background .15s, border-color .15s, transform .15s, box-shadow .15s;
-      user-select:none;
-    }
+    .tab-sort-item { display:flex; align-items:center; gap:12px;
+      background:var(--card2); border-radius:10px; padding:11px 14px; cursor:grab;
+      border:2px solid transparent; transition:background .15s, border-color .15s, transform .15s, box-shadow .15s;
+      user-select:none; }
     .tab-sort-item:hover { border-color:var(--accent); }
-    .tab-sort-item.dragging {
-      opacity:0.45; cursor:grabbing; transform:scale(1.02);
-      box-shadow:0 8px 24px rgba(0,0,0,0.18);
-    }
-    .tab-sort-item.drag-over {
-      border-color:var(--accent);
-      background:color-mix(in srgb,var(--accent) 10%,var(--card2));
-      transform:translateY(-2px);
-    }
+    .tab-sort-item.dragging { opacity:0.45; cursor:grabbing; transform:scale(1.02);
+      box-shadow:0 8px 24px rgba(0,0,0,0.18); }
+    .tab-sort-item.drag-over { border-color:var(--accent);
+      background:color-mix(in srgb,var(--accent) 10%,var(--card2)); transform:translateY(-2px); }
     .drag-handle { font-size:18px; color:var(--subtext); cursor:grab; flex-shrink:0; }
     .tab-sort-icon  { font-size:20px; flex-shrink:0; }
     .tab-sort-label { font-size:14px; font-weight:500; color:var(--text); flex:1; }
-
-    .reset-tabs-btn {
-      padding:6px 14px; border:1px solid var(--divider); border-radius:8px;
-      background:transparent; color:var(--subtext); font-size:12px; cursor:pointer;
-      margin-bottom:4px;
-    }
+    .reset-tabs-btn { padding:6px 14px; border:1px solid var(--divider); border-radius:8px;
+      background:transparent; color:var(--subtext); font-size:12px; cursor:pointer; margin-bottom:4px; }
     .reset-tabs-btn:hover { border-color:var(--accent); color:var(--accent); }
 
     /* ── Config tab ── */
@@ -1561,7 +1538,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       transition:border-color .15s, box-shadow .15s; }
     .cfg-input:focus { outline:none; border-color:var(--accent);
       box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 15%,transparent); }
-
     .cfg-optional { font-size:10px; font-weight:400; color:var(--subtext); text-transform:none; letter-spacing:0; }
     .select-wrap { position:relative; }
     .select-caret { position:absolute; right:12px; top:50%; transform:translateY(-50%); pointer-events:none; color:var(--subtext); font-size:11px; }
@@ -1574,19 +1550,15 @@ class PcUserStatisticsPanel extends HTMLElement {
     .mapping-arrow { font-size:18px; color:var(--subtext); padding-bottom:8px; flex-shrink:0; }
     .remove-row-btn { padding:6px 10px; border:none; border-radius:6px;
       background:color-mix(in srgb,#ef4444 15%,transparent);
-      color:#ef4444; cursor:pointer; font-size:13px; flex-shrink:0;
-      align-self:flex-end; margin-bottom:1px; }
+      color:#ef4444; cursor:pointer; font-size:13px; flex-shrink:0; align-self:flex-end; margin-bottom:1px; }
     .remove-row-btn:hover { background:color-mix(in srgb,#ef4444 25%,transparent); }
-
     .cfg-save-row { display:flex; gap:10px; margin:20px 0 16px; }
     .cfg-save-btn { min-width:220px; }
-
     .cfg-banner { padding:12px 16px; border-radius:10px; font-size:13px; font-weight:500; margin-bottom:16px; }
     .cfg-banner.success { background:color-mix(in srgb,#10b981 12%,var(--card));
       color:#059669; border:1px solid color-mix(in srgb,#10b981 30%,transparent); }
     .cfg-banner.error   { background:color-mix(in srgb,#ef4444 12%,var(--card));
       color:#dc2626; border:1px solid color-mix(in srgb,#ef4444 30%,transparent); }
-
     .cfg-info-box { background:color-mix(in srgb,var(--accent) 6%,var(--card));
       border:1px solid color-mix(in srgb,var(--accent) 20%,transparent);
       border-radius:10px; padding:14px 16px; }
@@ -1602,23 +1574,16 @@ class PcUserStatisticsPanel extends HTMLElement {
     .metric-btn.active { background:var(--accent); color:white;
       border-color:var(--accent); font-weight:600; }
     .reload-hist-btn { padding:6px 14px; border:1px solid var(--divider);
-      border-radius:8px; background:transparent; color:var(--subtext);
-      font-size:13px; cursor:pointer; }
-
-    .bar-chart-wrap { background:var(--card2);
-      border-radius:12px; padding:16px; overflow-x:auto; }
+      border-radius:8px; background:transparent; color:var(--subtext); font-size:13px; cursor:pointer; }
+    .bar-chart-wrap { background:var(--card2); border-radius:12px; padding:16px; overflow-x:auto; }
     .bar-chart-svg { width:100%; min-width:300px; height:auto; display:block; }
     .bar-legend { flex-direction:row; flex-wrap:wrap; gap:12px; margin-top:10px; }
-
-    /* Week summary */
     .week-cards { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
     .week-user-card { display:flex; align-items:center; gap:10px;
-      background:var(--card2);
-      border-radius:10px; padding:12px 14px; flex:1; min-width:120px; }
+      background:var(--card2); border-radius:10px; padding:12px 14px; flex:1; min-width:120px; }
     .week-user-info { flex:1; }
     .week-user-name { font-size:12px; color:var(--subtext); text-transform:capitalize; }
     .week-user-val  { font-size:16px; font-weight:700; }
-
     .day-table { width:100%; border-collapse:collapse; font-size:13px; }
     .day-table th { text-align:left; padding:8px 10px; font-size:11px; font-weight:600;
       text-transform:uppercase; letter-spacing:.5px; color:var(--subtext);
@@ -1629,10 +1594,15 @@ class PcUserStatisticsPanel extends HTMLElement {
     .day-bar-fill { height:100%; border-radius:3px; }
     .day-val { font-size:12px; font-weight:600; }
 
-    /* Misc */
+    /* ── Misc ── */
     .empty-state { text-align:center; color:var(--subtext); padding:40px 20px; font-size:14px; }
     .empty-state.small { padding:16px; font-size:13px; }
   `; }
 }
 
-customElements.define("pc-user-statistics-panel", PcUserStatisticsPanel);
+// ── FIX: Guard against double-registration on HA navigate/reload ──────────────
+// Without this guard, HA re-executes the JS file on panel re-entry, causing:
+// "Failed to execute 'define' on 'CustomElementRegistry': name already used"
+if (!customElements.get("pc-user-statistics-panel")) {
+  customElements.define("pc-user-statistics-panel", PcUserStatisticsPanel);
+}

@@ -1,7 +1,14 @@
 # File Name: config_flow.py
-# Version: 2.1.0
+# Version: 2.4.1
 # Description: Configuration flow and options flow for the PC User Statistics integration.
-# Last Updated: March 1, 2026
+# Last Updated: March 2, 2026
+#
+# Fix in 2.4.1:
+#   FIX: Removed OptionsFlow.__init__() and the config_entry parameter from
+#        async_get_options_flow(). In HA 2024.x, config_entry is a read-only
+#        property on the OptionsFlow base class — setting it manually raises:
+#        AttributeError: property 'config_entry' of 'OptionsFlow' object has no setter
+#        HA now injects config_entry automatically; the flow just uses self.config_entry.
 
 import voluptuous as vol
 import logging
@@ -32,10 +39,9 @@ async def async_check_influxdb_connection(
     port: int,
     username: str,
     password: str,
-    database: str
+    database: str,
 ) -> tuple[bool, str]:
-    """
-    Asynchronously check InfluxDB connection and database access.
+    """Asynchronously check InfluxDB connection and database access.
 
     Returns:
         Tuple of (success, error_key)
@@ -47,10 +53,11 @@ async def async_check_influxdb_connection(
 
     try:
         async with aiohttp.ClientSession() as session:
+            # Step 1: ping
             try:
                 async with session.get(
                     f"http://{host}:{port}/ping",
-                    timeout=aiohttp.ClientTimeout(total=5)
+                    timeout=aiohttp.ClientTimeout(total=5),
                 ) as response:
                     if response.status != 204:
                         _LOGGER.error("InfluxDB ping failed: HTTP %s", response.status)
@@ -59,14 +66,15 @@ async def async_check_influxdb_connection(
                 _LOGGER.error("InfluxDB ping failed: %s", err)
                 return False, "cannot_connect"
 
+            # Step 2: verify database exists
             query = urllib.parse.urlencode({"q": "SHOW DATABASES"})
-            auth = aiohttp.BasicAuth(username, password)
+            auth  = aiohttp.BasicAuth(username, password)
 
             try:
                 async with session.get(
                     f"http://{host}:{port}/query?{query}",
                     auth=auth,
-                    timeout=aiohttp.ClientTimeout(total=5)
+                    timeout=aiohttp.ClientTimeout(total=5),
                 ) as response:
                     if response.status != 200:
                         _LOGGER.error("InfluxDB query failed: HTTP %s", response.status)
@@ -94,7 +102,8 @@ async def async_check_influxdb_connection(
                         return False, "cannot_connect"
 
                     databases = [
-                        db[0] for db in first_series["values"]
+                        db[0]
+                        for db in first_series["values"]
                         if isinstance(db, list) and len(db) > 0
                     ]
 
@@ -103,7 +112,9 @@ async def async_check_influxdb_connection(
                         return False, "cannot_connect"
 
                     if database not in databases:
-                        _LOGGER.error("Database '%s' not found. Available: %s", database, databases)
+                        _LOGGER.error(
+                            "Database '%s' not found. Available: %s", database, databases
+                        )
                         return False, "cannot_connect"
 
                     _LOGGER.info("Successfully connected to InfluxDB database '%s'", database)
@@ -118,9 +129,10 @@ async def async_check_influxdb_connection(
         return False, "unknown"
 
 
+# ── String helpers ────────────────────────────────────────────────────────────
+
 def _parse_user_mappings(raw: str) -> dict[str, str]:
-    """
-    Parse user mappings from a comma-separated string.
+    """Parse user mappings from a comma-separated string.
 
     Format: "sensor_state=user_id, sensor_state=user_id"
     Example: "konge=flemming, lukas=lukas, sebas=sebastian"
@@ -133,7 +145,7 @@ def _parse_user_mappings(raw: str) -> dict[str, str]:
         if "=" not in part:
             continue
         key, _, value = part.partition("=")
-        key = key.strip().lower()
+        key   = key.strip().lower()
         value = value.strip().lower()
         if key and value:
             result[key] = value
@@ -141,23 +153,33 @@ def _parse_user_mappings(raw: str) -> dict[str, str]:
 
 
 def _parse_tracked_users(raw: str) -> list[str]:
-    """
-    Parse tracked users from a comma-separated string.
+    """Parse tracked users from a comma-separated string.
 
     Example: "flemming, lukas, sebastian"
     """
     return [u.strip().lower() for u in raw.split(",") if u.strip()]
 
 
-def _user_mappings_to_str(mappings: dict[str, str]) -> str:
-    """Convert user mappings dict to editable string."""
-    return ", ".join(f"{k}={v}" for k, v in mappings.items())
+def _user_mappings_to_str(mappings: dict) -> str:
+    """Convert user mappings dict to editable string.
+
+    Handles both plain-string values and dict values (with user_id key)
+    so the text field shows correctly even when ha_user dicts are stored.
+    """
+    parts = []
+    for k, v in mappings.items():
+        user_id = v.get("user_id", "") if isinstance(v, dict) else v
+        if k and user_id:
+            parts.append(f"{k}={user_id}")
+    return ", ".join(parts)
 
 
 def _tracked_users_to_str(users: list[str]) -> str:
     """Convert tracked users list to editable string."""
     return ", ".join(users)
 
+
+# ── Config flow ───────────────────────────────────────────────────────────────
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle config flow for PC User Statistics."""
@@ -166,13 +188,21 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: config_entries.ConfigEntry) -> "OptionsFlow":
-        """Return options flow handler."""
-        return OptionsFlow(config_entry)
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> "OptionsFlow":
+        """Return options flow handler.
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        FIX: No longer passes config_entry to OptionsFlow constructor.
+        HA 2024+ injects it automatically via the base class property.
+        """
+        return OptionsFlow()
+
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Handle the initial step."""
-        errors = {}
+        errors: dict[str, str] = {}
 
         if user_input is not None:
             await self.async_set_unique_id(DOMAIN)
@@ -184,92 +214,82 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input["port"],
                 user_input["username"],
                 user_input["password"],
-                user_input["database"]
+                user_input["database"],
             )
 
             if success:
                 return self.async_create_entry(
                     title="PC User Statistics",
-                    data=user_input
+                    data=user_input,
                 )
             else:
                 errors["base"] = error_key
 
         data_schema = vol.Schema({
-            vol.Required("host", default="a0d7b954-influxdb"): str,
-            vol.Required("port", default=8086): int,
-            vol.Required("database", default=DEFAULT_DATABASE): str,
-            vol.Required("username", default="homeassistant"): str,
-            vol.Required("password"): str,
+            vol.Required("host",     default="a0d7b954-influxdb"): str,
+            vol.Required("port",     default=8086):                 int,
+            vol.Required("database", default=DEFAULT_DATABASE):     str,
+            vol.Required("username", default="homeassistant"):      str,
+            vol.Required("password"):                               str,
         })
 
         return self.async_show_form(
             step_id="user",
             data_schema=data_schema,
-            errors=errors
+            errors=errors,
         )
 
+
+# ── Options flow ──────────────────────────────────────────────────────────────
 
 class OptionsFlow(config_entries.OptionsFlow):
-    """Handle options flow — allows editing users after initial setup."""
+    """Handle options flow — allows editing users after initial setup.
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
+    FIX: No __init__ — HA 2024+ injects config_entry as a read-only base
+    class property. Defining __init__(self, config_entry) and then setting
+    self.config_entry raises AttributeError because the property has no setter.
+    """
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
         """Show and handle the options form."""
-        errors = {}
+        errors: dict[str, str] = {}
 
         # Current values — prefer options, fall back to defaults
-        current_mappings = self.config_entry.options.get(
-            CONF_USER_MAPPINGS, DEFAULT_USER_MAP
-        )
-        current_users = self.config_entry.options.get(
-            CONF_TRACKED_USERS, DEFAULT_USERS
-        )
+        current_mappings = self.config_entry.options.get(CONF_USER_MAPPINGS, DEFAULT_USER_MAP)
+        current_users    = self.config_entry.options.get(CONF_TRACKED_USERS,  DEFAULT_USERS)
 
         if user_input is not None:
-            # Parse the free-text fields
             new_mappings = _parse_user_mappings(user_input[CONF_USER_MAPPINGS])
-            new_users = _parse_tracked_users(user_input[CONF_TRACKED_USERS])
+            new_users    = _parse_tracked_users(user_input[CONF_TRACKED_USERS])
 
-            # Validate: must have at least one user
             if not new_users:
                 errors[CONF_TRACKED_USERS] = "no_users"
-
-            # Validate: every mapped user must exist in tracked users
             elif not all(v in new_users for v in new_mappings.values()):
                 errors[CONF_USER_MAPPINGS] = "mapping_user_not_tracked"
-
             else:
                 _LOGGER.info(
                     "Options updated — users: %s, mappings: %s",
-                    new_users, new_mappings
+                    new_users, new_mappings,
                 )
                 return self.async_create_entry(
                     title="",
                     data={
                         CONF_USER_MAPPINGS: new_mappings,
                         CONF_TRACKED_USERS: new_users,
-                    }
+                    },
                 )
 
             # On error, keep what the user typed
-            current_mappings = _parse_user_mappings(user_input[CONF_USER_MAPPINGS])
+            current_mappings  = _parse_user_mappings(user_input[CONF_USER_MAPPINGS])
             current_users_str = user_input[CONF_TRACKED_USERS]
         else:
             current_users_str = _tracked_users_to_str(current_users)
 
         options_schema = vol.Schema({
-            vol.Required(
-                CONF_TRACKED_USERS,
-                default=current_users_str,
-            ): str,
-            vol.Required(
-                CONF_USER_MAPPINGS,
-                default=_user_mappings_to_str(current_mappings),
-            ): str,
+            vol.Required(CONF_TRACKED_USERS, default=current_users_str):                      str,
+            vol.Required(CONF_USER_MAPPINGS, default=_user_mappings_to_str(current_mappings)): str,
         })
 
         return self.async_show_form(

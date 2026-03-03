@@ -1,13 +1,13 @@
 # File Name: const.py
-# Version: 2.0.2
-# Description: Constants for the PC User Statistics integration, including entity IDs, user mappings, and device information.
-# Last Updated: March 1, 2026
+# Version: 2.4.1
+# Description: Constants for the PC User Statistics integration.
+# Last Updated: March 3, 2026
 
 from typing import Final
 
 # Integration metadata
 DOMAIN: Final = "pc_user_statistics"
-__version__: Final = "2.0.2"
+__version__: Final = "2.4.1"
 
 # Device identifiers
 HUB_DEVICE_ID: Final = "statistics_hub"
@@ -57,13 +57,13 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 
 SENSOR_CONFIGS: Final = {
     # Hub sensors (global/live status)
-    "current_user": ("current_user", "mdi:account", None, None, None, None),
-    "current_session_time": ("current_session_time", "mdi:clock-outline", SensorDeviceClass.DURATION, SensorStateClass.MEASUREMENT, "s", 0),
-    "current_session_energy": ("current_session_energy", "mdi:lightning-bolt", SensorDeviceClass.ENERGY, SensorStateClass.TOTAL, "kWh", 3),
-    "current_session_cost": ("current_session_cost", "mdi:currency-usd", SensorDeviceClass.MONETARY, SensorStateClass.TOTAL, "DKK", 2),
-    
+    "current_user":           ("current_user",           "mdi:account",        None,                       None,                        None,  None),
+    "current_session_time":   ("current_session_time",   "mdi:clock-outline",  SensorDeviceClass.DURATION,  SensorStateClass.MEASUREMENT, "s",   0),
+    "current_session_energy": ("current_session_energy", "mdi:lightning-bolt", SensorDeviceClass.ENERGY,    SensorStateClass.TOTAL,       "kWh", 3),
+    "current_session_cost":   ("current_session_cost",   "mdi:currency-usd",   SensorDeviceClass.MONETARY,  SensorStateClass.TOTAL,       "DKK", 2),
+
     # User sensors (per-user monthly statistics)
-    "monthly_time": ("monthly_time", "mdi:clock-outline", SensorDeviceClass.DURATION, SensorStateClass.TOTAL_INCREASING, "s", 0),
-    "monthly_energy": ("monthly_energy", "mdi:lightning-bolt", SensorDeviceClass.ENERGY, SensorStateClass.TOTAL_INCREASING, "kWh", 3),
-    "monthly_cost": ("monthly_cost", "mdi:currency-usd", SensorDeviceClass.MONETARY, SensorStateClass.TOTAL, "DKK", 2),
+    "monthly_time":   ("monthly_time",   "mdi:clock-outline",  SensorDeviceClass.DURATION, SensorStateClass.TOTAL_INCREASING, "s",   0),
+    "monthly_energy": ("monthly_energy", "mdi:lightning-bolt", SensorDeviceClass.ENERGY,   SensorStateClass.TOTAL_INCREASING, "kWh", 3),
+    "monthly_cost":   ("monthly_cost",   "mdi:currency-usd",   SensorDeviceClass.MONETARY, SensorStateClass.TOTAL,            "DKK", 2),
 }

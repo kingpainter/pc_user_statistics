@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.4.1] - 2026-03-03
+
+### Fixed
+
+- **`__init__.py` — Tidsmåling forkert ved brugerskift** (`_handle_user_change`):
+  - `self.last_time` blev ikke nulstillet inden ny bruger startede akkumulering
+  - Første delta for ny bruger inkluderede tid fra forrige brugers session (phantom-tid)
+  - Fix: `self.last_time = now` sættes nu inde i `_handle_user_change` ved hvert brugerskift
+
+- **`__init__.py` — Akkumulerende deltas ved 60s polling** (`_async_update_data`):
+  - `self.last_time` blev aldrig opdateret efter `_calculate_deltas()` i polling-løkken
+  - Resulterede i voksende delta-vinduer: poll #1 = 60s, poll #2 = 120s, poll #3 = 180s osv.
+  - Fix: `self.last_time = now` tilføjet efter `_calculate_deltas()` i `_async_update_data`
+
+- **`websocket.py` — WS-forbindelse crashede ved gem af konfiguration** (`ws_save_config`):
+  - `async_update_entry()` triggede `add_update_listener` → `async_reload()` synkront
+  - Integration unloadede mens WebSocket-svaret endnu ikke var sendt → panel frøs
+  - Fix: `connection.send_result()` sendes først, reload scheduleres via `async_create_task()`
+
+- **`websocket.py` — HA mobil-bruger forsvandt efter reload** (`ws_get_config`):
+  - Returnerede `coordinator.user_map` (normaliseret — `ha_user` smidt væk)
+  - Fix: Returnerer nu raw `entry.options` så `ha_user` dict-værdier bevares
+
+- **`config_flow.py` — `AttributeError` ved åbning af optionsflow** (`OptionsFlow`):
+  - `OptionsFlow.__init__` satte `self.config_entry` som HA 2024+ har gjort til read-only property
+  - Fix: `__init__` fjernet — HA injekterer `config_entry` automatisk via base-klassen
+
+- **`panel.py` — "Removing unknown panel" i loggen ved reload**:
+  - `_panel_registered` flag overlevede integration-reload → `async_register_panel()` sprang over
+  - Efterfølgende unload kaldte `async_remove_panel()` på et panel der ikke eksisterede
+  - Fix: `async_unregister_panel()` nulstiller nu altid `_panel_registered = False`
+
+- **`manifest.json` — Forældet `influxdb==5.3.2` requirement fjernet**:
+  - Integration bruger udelukkende `aiohttp` til InfluxDB-kommunikation (siden v2.0.0)
+  - `influxdb` Python-pakken var aldrig i brug og kunne forårsage installationsfejl
+
+### Changed
+
+- **`pc-user-statistics-panel.js` — Tab-ikoner gjort større og centreret**:
+  - Ikon-størrelse: `18px` → `30px`
+  - Gap mellem ikon og label: `2px` → `5px`
+  - Tab-padding: `10px/14px` → `14px/20px`
+  - Tabs centreret i stedet for venstre-aligned (`justify-content: center`)
+
+---
+
+## [2.4.0] - 2026-03-02
+
+### Added
+
+- **Persistent `aiohttp.ClientSession`** (`__init__.py`):
+  - Én HTTP-session oprettes ved setup og genbruges til alle InfluxDB-kald
+  - Lukkes rent i `async_shutdown()` ved integration-unload
+  - Eliminerer overhead fra gentagne session-oprettelser
+
+- **Smart tab-aware polling** (`pc-user-statistics-panel.js`):
+  - `_loadForTab()` bruges i 30s polling — henter kun data relevant for aktiv tab
+  - Historik- og konfigurationstabs auto-refreshes aldrig
+  - `_load()` bruges kun ved første connect og manuel Opdater-knap
+
+- **`async_track_state_change_event`** (`__init__.py`):
+  - Erstatter global `EVENT_STATE_CHANGED` bus
+  - HA filtrerer events på kilden — langt mere effektivt
+
+- **`async_shutdown()`** (`__init__.py`):
+  - Lukker persistent HTTP-session rent ved integration-unload
+
+### Fixed
+
+- Monthly data race condition: snapshot tages før InfluxDB-load, merges efter
+- `_query_history` i `websocket.py` genbruger nu koordinatorens persistente session
+
+---
+
+## [2.3.2] - 2026-03-02
+
+### Fixed
+
+- Mobil-responsivt CSS: tab-labels skjules på skærme under 600px
+- Notifikations-layout optimeret til mobilvisning
+- Diverse CSS-justeringer for bedre mobiloplevelse
+
+---
+
+## [2.3.1] - 2026-03-01
+
+### Fixed
+
+- Lovelace resource registrering fejlede med HA 2024.x API-ændringer
+  - `hass.data["lovelace"].resources` erstattet med `hass.data["lovelace_resources"]`
+  - Fallback til ældre API for bagudkompatibilitet
+- Panel registreret med `module_url` (ES module) i stedet for `js_url`
+
+---
+
 ## [2.3.0] - 2026-03-01
 
 ### 🎉 Major Feature Release — Custom Panel & Notification System
@@ -22,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Live Header**
   - Pulserende ring-animation når en bruger spiller (sonar-effekt)
-  - HalvCircel watt-gauge med live strømforbrug opdateret fra HA state
+  - Halvcirkel watt-gauge med live strømforbrug opdateret fra HA state
   - Gradient header-baggrund under aktiv session
   - Farveskala grøn → gul → rød baseret på watt-belastning
 
@@ -33,47 +128,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Notification System** (`store.py`, `notification_manager.py`)
   - Persistent storage i `.storage/pc_user_statistics.notifications`
-  - 4 premade regler (alle deaktiveret som standard):
-    - ⏱️ Pausepåmindelse (gentages hvert 60 min)
-    - 🌙 Lang session advarsel (én gang ved 3 timer)
-    - 💰 Prisgrænse (én gang ved 10 kr)
-    - 🌅 PC glemt tændt (gentages hvert 30 min ved inaktivitet)
+  - 4 premade regler (alle deaktiveret som standard)
   - Opret/rediger/slet egne regler
-  - Inline rediger premade regler (trigger-værdi, besked, repeat)
-  - Test-knap sender øjeblikkeligt push til konfigurerede enheder
-  - Anti-spam: ikke-gentagne regler fyrer én gang per session
-  - Template-variabler: `{user}`, `{time}`, `{cost}` i titel og besked
+  - Anti-spam, test-knap, template-variabler: `{user}`, `{time}`, `{cost}`
 
-- **Historik-tab**
-  - SVG søjlediagram — daglige totaler per bruger, seneste 30 dage
-  - Metric-vælger: Tid / Energi / Pris
-  - 7-dages tabel med mini-søjler og daglige værdier
-  - Lazy-load — data hentes kun første gang tab klikkes
-
-- **Konfiguration-tab**
-  - Rediger sensor entity IDs direkte i UI (bruger, watt, måler, pris)
-  - Dynamisk bruger-mappings tabel — tilføj/fjern brugere
-  - Gem → trigger automatisk integration-reload via `_async_options_updated`
-  - Drag-and-drop tab-rækkefølge med visuelt feedback
-
-- **WebSocket API** (`websocket.py`) — 11 kommandoer:
-  - `get_stats`, `get_system`
-  - `get_notifications`, `save_notification`, `delete_notification`, `test_notification`
-  - `get_devices`, `save_devices`
-  - `get_history` — InfluxDB `GROUP BY time(1d), "user"` for op til 90 dage
-  - `get_config`, `save_config`
+- **Historik-tab**: SVG søjlediagram, daglige totaler, 30 dage, lazy-load
+- **Konfiguration-tab**: Rediger entity IDs og bruger-mappings direkte i UI
+- **WebSocket API** (`websocket.py`): 11 kommandoer
 
 ### Changed
 
-- Entity IDs er nu dynamiske — læses fra `config_entry.data` med fallback til konstanter
-- `_async_options_updated` listener registreret ved setup for automatisk reload ved konfigurationsændringer
-- Panel registreret med `js_url` (ikke `module_url`) for korrekt browser-loading
-
-### Fixed
-
-- JS `SyntaxError: Unexpected token 'class'` — panel omskrevet til vanilla `HTMLElement`, ingen ES module imports
-- `monthly_cost` sensor: `TOTAL_INCREASING` → `TOTAL` (korrekt for `MONETARY` device class)
-- Manglende `CONF_USER_MAPPINGS`, `CONF_TRACKED_USERS`, `DEFAULT_USER_MAP`, `DEFAULT_USERS` konstanter i `const.py`
+- Entity IDs er nu dynamiske — læses fra `config_entry.data`
+- Admin-only panel (`require_admin=True`), Lovelace cards tilgængelige for alle
 
 ---
 
@@ -81,16 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `MonthlyCostSensor`: `SensorStateClass.TOTAL_INCREASING` → `SensorStateClass.TOTAL`
-  — HA 2024+ tillader kun `TOTAL` eller `None` for `MONETARY` device class
-- Tilføjet manglende konstanter til `const.py`:
-  - `CONF_USER_MAPPINGS`, `CONF_TRACKED_USERS`
-  - `DEFAULT_USER_MAP`, `DEFAULT_USERS`
-  - `USER_MAP` og `USERS` bevaret som aliases til bagudkompatibilitet
-
-### Changed
-
-- Version bumped: `2.0.1` → `2.0.2` i `const.py` og `manifest.json`
+- `MonthlyCostSensor`: `TOTAL_INCREASING` → `TOTAL` (HA 2024+ krav for `MONETARY`)
+- Tilføjet manglende konstanter til `const.py`: `CONF_USER_MAPPINGS`, `CONF_TRACKED_USERS`, `DEFAULT_USER_MAP`, `DEFAULT_USERS`
 
 ---
 
@@ -98,58 +156,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- JS `SyntaxError: Invalid or unexpected token` — escaped backticks fra Python string-erstatninger renset ud
-- `_headerHTML` omskrevet til ren string-konkatenation (ingen template literals)
+- JS `SyntaxError: Invalid or unexpected token` — escaped backticks renset ud
 
 ---
 
 ## [2.0.0] - 2026-01-11
 
-### 🎉 Major Release - Complete Restructure
+### 🎉 Major Release — Complete Restructure
 
-This release represents a complete restructure of the integration to meet Home Assistant's Silver quality scale requirements and modern best practices.
-
-### ⚠️ Breaking Changes
-
-- **Integration domain renamed**: `spille_pc_statistik` → `pc_user_statistics`
-  - **Action required**: You must remove the old integration and reconfigure
-  - Entity IDs will change (e.g., `sensor.flemming_monthly_time` → `sensor.statistics_flemming_monthly_time`)
-  - Update any automations, scripts, or dashboards that reference the old entity IDs
-
-### Added
-
-- **Device Organization**: Full device structure implementation
-  - Hub device: "Statistics Hub" with global sensors
-  - User devices: Individual devices per user (Flemming, Lukas, Sebastian)
-  - Proper device linking via `via_device`
-- **New Files**:
-  - `helpers.py`: Shared parsing, validation, and formatting utilities
-  - `strings.json`: English translations (default language)
-  - `README.md`: Comprehensive user documentation
-  - `PLANNED_FEATURES.md`: Roadmap for future development
-  - `HA_COMPLIANCE.md`: Quality scale compliance documentation
-- **Version Consistency**: `__version__` constant in `const.py` synchronized with `manifest.json`
-- **Enhanced Validation**: Config validation, safe state parsing, InfluxDB response handling
-- **Type Hints**: Complete type annotations throughout codebase
-- **Error Handling**: Comprehensive try/except blocks with proper logging levels
-- **Data Buffering**: 100-point FIFO write buffer for failed InfluxDB writes
-- **Retry Logic**: Up to 3 retry attempts per buffered write
-- **Unit Tests**: >80% coverage (`tests/test_helpers.py`, `tests/test_init.py`)
-
-### Changed
-
-- `has_entity_name = True` for all sensors (HA 2024+ naming)
-- Base classes `PCStatisticsHubSensor` and `PCStatisticsUserSensor`
-- Native value return (no more string formatting in sensors)
-- Proper device classes: DURATION, ENERGY, MONETARY
-- Users and mappings loaded from config entry options (not hardcoded)
-
-### Fixed
-
-- Session reset logic: `acc_time` no longer resets on user → None
-- InfluxDB response parsing: robust handling of malformed data
-- Negative power values clamped to 0
-- Proper handling of "unavailable" and "unknown" sensor states
+- Integration omdøbt: `spille_pc_statistik` → `pc_user_statistics`
+- Fuld device-struktur: Hub device + per-bruger devices med `via_device`
+- Silver quality scale: type hints, device classes, `has_entity_name = True`
+- 100-point FIFO write buffer med 3 retry-forsøg
+- Config flow med InfluxDB-validering
 
 ---
 
@@ -157,80 +176,7 @@ This release represents a complete restructure of the integration to meet Home A
 
 ### Changed
 
-- Updated default InfluxDB database name from "stroemforbrug" to "homeassistant"
-- Added `DEFAULT_DATABASE` constant in `const.py`
-
----
-
-## [1.0.7] - 2025-09-16
-
-### Fixed
-
-- Resolved circular import issue in `__init__.py`
-
----
-
-## [1.0.6] - 2025-09-15
-
-### Fixed
-
-- Replaced `async_forward_entry_setup` with `async_forward_entry_setups`
-- Improved InfluxDB response handling for empty responses
-- Replaced synchronous InfluxDB write with async aiohttp POST
-
----
-
-## [1.0.5] - 2025-09-15
-
-### Fixed
-
-- Replaced synchronous `client.query` with async aiohttp request
-
----
-
-## [1.0.4] - 2025-09-15
-
-### Fixed
-
-- Resolved setup failure with proper file structure and debug logging
-
----
-
-## [1.0.3] - 2025-09-15
-
-### Fixed
-
-- Corrected `TypeError` when parsing InfluxDB `SHOW DATABASES` response
-
-### Added
-
-- `CHANGELOG.md` file for version history
-
----
-
-## [1.0.2] - 2025-09-15
-
-### Fixed
-
-- Fixed `TypeError` in InfluxDB response parsing
-- Improved validation and logging
-
-### Added
-
-- Version control headers in all files
-- Danish translations in `translations/da.json`
-
----
-
-## [1.0.1] - 2025-09-15
-
-### Fixed
-
-- Replaced synchronous database query with async aiohttp request
-
-### Added
-
-- Danish translations support
+- Default InfluxDB database: `"stroemforbrug"` → `"homeassistant"`
 
 ---
 
@@ -238,51 +184,4 @@ This release represents a complete restructure of the integration to meet Home A
 
 ### Added
 
-- Initial release of Spille PC Statistik integration
-- Power consumption, time, and cost tracking for three users
-- InfluxDB data storage
-- Live and monthly statistics sensors
-- Lovelace dashboard configuration
-- Config flow for setup
-
----
-
-## Migration Guide: 1.x → 2.0.0
-
-### Step 1: Backup Your Data
-
-Your historical data in InfluxDB will **not** be affected, but entity IDs will change.
-
-### Step 2: Remove Old Integration
-
-1. Go to **Settings** → **Devices & Services**
-2. Find **Spille PC Statistik** → Click **Delete**
-
-### Step 3: Install New Integration
-
-1. Copy `custom_components/pc_user_statistics/` to your HA config
-2. Restart Home Assistant
-3. Go to **Settings** → **Devices & Services** → **Add Integration**
-4. Search for **PC User Statistics** and configure with your InfluxDB details
-
-### Step 4: Update Entity ID References
-
-| Old Entity ID | New Entity ID |
-|---------------|---------------|
-| `sensor.current_user` | `sensor.statistics_hub_current_user` |
-| `sensor.current_session_time` | `sensor.statistics_hub_current_session_time` |
-| `sensor.current_session_energy` | `sensor.statistics_hub_current_session_energy` |
-| `sensor.current_session_cost` | `sensor.statistics_hub_current_session_cost` |
-| `sensor.flemming_monthly_time` | `sensor.statistics_flemming_monthly_time` |
-| `sensor.flemming_monthly_energy` | `sensor.statistics_flemming_monthly_energy` |
-| `sensor.flemming_monthly_cost` | `sensor.statistics_flemming_monthly_cost` |
-| *(same pattern for Lukas and Sebastian)* | *(same pattern)* |
-
----
-
-[2.3.0]: https://github.com/kingpainter/pc_user_statistics/releases/tag/v2.3.0
-[2.0.2]: https://github.com/kingpainter/pc_user_statistics/releases/tag/v2.0.2
-[2.0.1]: https://github.com/kingpainter/pc_user_statistics/releases/tag/v2.0.1
-[2.0.0]: https://github.com/kingpainter/pc_user_statistics/releases/tag/v2.0.0
-[1.0.8]: https://github.com/kingpainter/pc_user_statistics/releases/tag/v1.0.8
-[1.0.7]: https://github.com/kingpainter/pc_user_statistics/releases/tag/v1.0.7
+- Initial release — strømforbrug, tid og pris per bruger via InfluxDB
