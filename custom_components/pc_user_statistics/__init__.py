@@ -1,7 +1,7 @@
 # File Name: __init__.py
-# Version: 2.4.1
+# Version: 2.5.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 2, 2026
+# Last Updated: March 3, 2026
 #
 # Changes in 2.4.1:
 #   FIX: Removed entry.add_update_listener(_async_options_updated).
@@ -15,7 +15,7 @@
 #        been delivered to the browser. This guarantees the WS round-trip completes
 #        before the coordinator is torn down.
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 import time
 from typing import Any
@@ -23,9 +23,9 @@ from typing import Any
 import aiohttp
 import urllib.parse
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryNotReady
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
@@ -103,13 +103,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # ── Track only the two sensors we care about ───────────────────────
         # async_track_state_change_event is far more efficient than the global
         # EVENT_STATE_CHANGED bus — HA filters at the source, not in our code.
-        user_entity = entry.data.get("user_entity", USER_ENTITY)
-        watt_entity = entry.data.get("watt_entity", WATT_ENTITY)
-
         entry.async_on_unload(
             async_track_state_change_event(
                 hass,
-                [user_entity, watt_entity],
+                [coordinator._user_entity, coordinator._watt_entity],
                 coordinator._handle_state_change,
             )
         )
@@ -210,8 +207,14 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # ── Timing ────────────────────────────────────────────────────────
         self.last_time: float = time.time()
         self.last_power: float = 0.0
-        self.last_month: int = datetime.utcnow().month
+        self.last_month: int = datetime.now(timezone.utc).month
         self.last_write_time: float = time.time()
+
+        # ── Cached entity IDs — read once at init, not on every state lookup ──
+        self._user_entity: str  = config_entry.data.get("user_entity",          USER_ENTITY)
+        self._watt_entity: str  = config_entry.data.get("watt_entity",          WATT_ENTITY)
+        self._device_entity: str = config_entry.data.get("device_power_entity", DEVICE_POWER_ENTITY)
+        self._price_entity: str = config_entry.data.get("price_entity",         PRICE_ENTITY)
 
         # ── Write buffer for failed InfluxDB writes ────────────────────────
         self.failed_writes: list[dict] = []
@@ -233,11 +236,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
     def _influx_base_url(self) -> str:
         return f"http://{self.config['host']}:{self.config['port']}"
 
-    async def _async_load_monthly_data(self) -> None:
-        """Query InfluxDB for initial monthly sums and merge into self.monthly."""
-        now = datetime.utcnow()
+    async def _async_load_monthly_data(self, retry: int = 0) -> None:
+        """Query InfluxDB for initial monthly sums and merge into self.monthly.
+
+        Retries up to 3 times with exponential backoff if InfluxDB is not yet
+        ready at HA startup (common when InfluxDB add-on starts after HA).
+        """
+        now = datetime.now(timezone.utc)
         month_start = (
-            now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat() + "Z"
+            now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
         )
 
         query = (
@@ -255,29 +262,48 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 f"{self._influx_base_url}/query?{query_params}"
             ) as response:
                 if response.status != 200:
-                    _LOGGER.error("InfluxDB monthly query failed: HTTP %s", response.status)
-                    return
-
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
                 data = await response.json()
 
             field_mappings = {"time": 1, "energy": 2, "cost": 3}
             parsed_data = parse_influxdb_response(data, field_mappings)
 
-            # Merge InfluxDB totals into monthly.
-            # We REPLACE the stored values (don't add to them) because the
-            # in-memory accumulator may have already counted deltas that are
-            # included in the InfluxDB sum — replacing avoids double-counting.
             for user, values in parsed_data.items():
                 if user in self.monthly:
                     self.monthly[user].update(values)
 
             self._monthly_loaded = True
-            _LOGGER.info("Monthly data loaded from InfluxDB: %s", self.monthly)
+            _LOGGER.info(
+                "Monthly data loaded from InfluxDB: %s",
+                {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in self.monthly.items()},
+            )
 
         except aiohttp.ClientError as err:
-            _LOGGER.error("Failed to query monthly data from InfluxDB: %s", err)
+            max_retries = 3
+            if retry < max_retries:
+                delay = 30 * (2 ** retry)  # 30s, 60s, 120s
+                _LOGGER.warning(
+                    "InfluxDB not ready for monthly data load (attempt %d/%d), "
+                    "retrying in %ds: %s",
+                    retry + 1, max_retries, delay, err,
+                )
+                async def _retry():
+                    import asyncio
+                    await asyncio.sleep(delay)
+                    await self._async_load_monthly_data(retry=retry + 1)
+                self.hass.async_create_task(_retry())
+            else:
+                _LOGGER.error(
+                    "Failed to load monthly data from InfluxDB after %d attempts: %s. "
+                    "Monthly totals will start from 0 and accumulate from now.",
+                    max_retries, err,
+                )
+                # Mark as loaded with zeros so panel doesn't show spinner forever
+                self._monthly_loaded = True
+
         except Exception as err:
             _LOGGER.exception("Unexpected error loading monthly data: %s", err)
+            self._monthly_loaded = True
 
     # ── Coordinator update ─────────────────────────────────────────────────
 
@@ -286,9 +312,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         now = time.time()
 
         # Roll over monthly totals on month change
-        current_month = datetime.utcnow().month
+        current_month = datetime.now(timezone.utc).month
         if current_month != self.last_month:
-            _LOGGER.info("Month changed, reloading monthly data")
+            _LOGGER.info(
+                "Month rolled over (%d → %d) — resetting monthly totals and reloading from InfluxDB",
+                self.last_month, current_month,
+            )
             self.monthly = {
                 user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
                 for user in self.tracked_users
@@ -330,13 +359,10 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         entity_id = event.data.get("entity_id")
         now = time.time()
 
-        user_entity = self.config_entry.data.get("user_entity", USER_ENTITY)
-        watt_entity = self.config_entry.data.get("watt_entity", WATT_ENTITY)
-
-        if entity_id == user_entity:
+        if entity_id == self._user_entity:
             await self._handle_user_change(event, now)
             # Note: last_time is set inside _handle_user_change for user events
-        elif entity_id == watt_entity and self.current_user:
+        elif entity_id == self._watt_entity and self.current_user:
             await self._handle_power_change(now)
             # Update last_time for power-change events
             self.last_time = now
@@ -436,15 +462,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
     def _get_power(self) -> float:
         """Net PC power = watt sensor minus meter device overhead."""
-        watt_state   = self.hass.states.get(self.config_entry.data.get("watt_entity", WATT_ENTITY))
-        device_state = self.hass.states.get(self.config_entry.data.get("device_power_entity", DEVICE_POWER_ENTITY))
+        watt_state   = self.hass.states.get(self._watt_entity)
+        device_state = self.hass.states.get(self._device_entity)
         watt         = safe_float_from_state(watt_state,   default=0.0, min_value=0.0)
         device_power = safe_float_from_state(device_state, default=0.0, min_value=0.0)
         return max(watt - device_power, 0.0)
 
     def _get_price(self) -> float:
         """Current energy price in DKK/kWh."""
-        price_state = self.hass.states.get(self.config_entry.data.get("price_entity", PRICE_ENTITY))
+        price_state = self.hass.states.get(self._price_entity)
         return safe_float_from_state(price_state, default=0.0, min_value=0.0)
 
     # ── InfluxDB write ─────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 # File Name: websocket.py
-# Version: 2.4.1
+# Version: 2.5.0
 # Description: WebSocket API for the PC User Statistics panel.
-# Last Updated: March 2, 2026
+# Last Updated: March 3, 2026
 #
 # Fixes in 2.4.1:
 #   FIX 1: ws_save_config — send_result BEFORE scheduling reload via async_create_task.
@@ -13,6 +13,9 @@
 #           creating a new aiohttp.ClientSession per call.
 
 import logging
+import urllib.parse
+from datetime import datetime, timedelta, timezone
+
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import websocket_api
@@ -62,13 +65,14 @@ def ws_get_stats(hass, connection, msg):
     try:
         data = coordinator.data or {}
         connection.send_result(msg["id"], {
-            "current_user":  data.get("current_user"),
-            "acc_time":      data.get("acc_time",   0.0),
-            "acc_energy":    data.get("acc_energy", 0.0),
-            "acc_cost":      data.get("acc_cost",   0.0),
-            "monthly":       data.get("monthly",    {}),
-            "tracked_users": coordinator.tracked_users,
-            "user_map":      coordinator.user_map,
+            "current_user":   data.get("current_user"),
+            "acc_time":       data.get("acc_time",    0.0),
+            "acc_energy":     data.get("acc_energy",  0.0),
+            "acc_cost":       data.get("acc_cost",    0.0),
+            "monthly":        data.get("monthly",     {}),
+            "monthly_loaded": data.get("monthly_loaded", False),
+            "tracked_users":  coordinator.tracked_users,
+            "user_map":       coordinator.user_map,
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
@@ -228,13 +232,10 @@ async def ws_get_history(hass, connection, msg):
 async def _query_history(coordinator, days: int) -> dict:
     """Run InfluxDB GROUP BY time(1d) query and return structured data.
 
-    FIX 3: Uses coordinator's persistent HTTP session instead of creating
-    a new aiohttp.ClientSession on every call (was wasteful and inconsistent).
+    Uses coordinator's persistent HTTP session instead of creating
+    a new aiohttp.ClientSession on every call.
     """
-    import urllib.parse
-    from datetime import datetime, timedelta, timezone
-
-    cfg = coordinator.config
+    cfg   = coordinator.config
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
 
     query = (
