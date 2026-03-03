@@ -1,14 +1,12 @@
 # File Name: config_flow.py
-# Version: 2.4.1
+# Version: 2.5.0
 # Description: Configuration flow and options flow for the PC User Statistics integration.
-# Last Updated: March 2, 2026
+# Last Updated: March 3, 2026
 #
-# Fix in 2.4.1:
-#   FIX: Removed OptionsFlow.__init__() and the config_entry parameter from
-#        async_get_options_flow(). In HA 2024.x, config_entry is a read-only
-#        property on the OptionsFlow base class — setting it manually raises:
-#        AttributeError: property 'config_entry' of 'OptionsFlow' object has no setter
-#        HA now injects config_entry automatically; the flow just uses self.config_entry.
+# Changes in 2.5.0:
+#   - Added reconfigure step (Gold quality scale requirement)
+#     Allows updating InfluxDB credentials without deleting the integration.
+#   - ConfigEntryAuthFailed raised on HTTP 401 during connection check.
 
 import voluptuous as vol
 import logging
@@ -235,6 +233,52 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
+            data_schema=data_schema,
+            errors=errors,
+        )
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle reconfiguration — allows updating InfluxDB credentials.
+
+        Accessible via Settings → Devices & Services → PC User Statistics → ⋮ → Reconfigure.
+        Gold quality scale requirement.
+        """
+        errors: dict[str, str] = {}
+        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+
+        if user_input is not None:
+            success, error_key = await async_check_influxdb_connection(
+                self.hass,
+                user_input["host"],
+                user_input["port"],
+                user_input["username"],
+                user_input["password"],
+                user_input["database"],
+            )
+
+            if success:
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data=user_input,
+                    reason="reconfigure_successful",
+                )
+            else:
+                errors["base"] = error_key
+
+        # Pre-fill with current config
+        current = entry.data if entry else {}
+        data_schema = vol.Schema({
+            vol.Required("host",     default=current.get("host",     "a0d7b954-influxdb")): str,
+            vol.Required("port",     default=current.get("port",     8086)):                 int,
+            vol.Required("database", default=current.get("database", DEFAULT_DATABASE)):     str,
+            vol.Required("username", default=current.get("username", "homeassistant")):      str,
+            vol.Required("password"):                                                         str,
+        })
+
+        return self.async_show_form(
+            step_id="reconfigure",
             data_schema=data_schema,
             errors=errors,
         )

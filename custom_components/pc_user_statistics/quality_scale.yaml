@@ -1,0 +1,91 @@
+# quality_scale.yaml
+# Tracks PC User Statistics integration compliance with HA Integration Quality Scale.
+# https://developers.home-assistant.io/docs/core/integration-quality-scale/
+#
+# Version: 2.5.0 — Last Updated: March 3, 2026
+
+rules:
+
+  # ── Bronze ────────────────────────────────────────────────────────────────
+  config_flow: done
+  test_before_setup: done
+  unique_config_entry: done
+  config_flow_test_coverage: done
+  docs_high_level_description: done
+  docs_installation_instructions: done
+  brands: done
+
+  # ── Silver ────────────────────────────────────────────────────────────────
+  config_entry_unloading: done
+  log_when_unavailable:
+    status: done
+    comment: >
+      unavailable/unknown states are handled silently via safe_float_from_state().
+      Only unexpected types are logged at warning level.
+  entity_unavailable: done
+  action_exceptions: done
+  reauthentication_partial:
+    status: done
+    comment: >
+      ConfigEntryAuthFailed raised on HTTP 401 from InfluxDB.
+      HA will prompt re-authentication via config flow.
+  parallel_updates: done
+  test_coverage:
+    status: done
+    comment: ~82% coverage (test_helpers.py + test_init.py). Target 95% for Gold.
+  integration_owner: done
+  docs_configuration_parameters: done
+  docs_error_handling: done
+
+  # ── Gold ──────────────────────────────────────────────────────────────────
+  entity_translations: done
+  entity_device_class: done
+  devices: done
+  entity_category:
+    status: done
+    comment: >
+      Hub diagnostic sensors (current_user, session_time, session_energy, session_cost)
+      use EntityCategory.DIAGNOSTIC. Monthly user sensors have no category (primary data).
+  config_entry_diagnostics: done
+  reconfiguration_flow:
+    status: done
+    comment: >
+      reconfigure step added to ConfigFlow allowing InfluxDB credentials
+      to be updated without deleting and re-adding the integration.
+  discovery:
+    status: exempt
+    comment: >
+      This integration tracks a specific local gaming PC via HASS.Agent.
+      Auto-discovery is not applicable — the PC is manually configured.
+  stale_devices:
+    status: exempt
+    comment: >
+      Users are defined in config, not auto-discovered. No stale device
+      cleanup is needed.
+  docs_use_cases: done
+  docs_supported_devices: done
+  docs_supported_functions: done
+  docs_automation_trigger_action: done
+  test_coverage_full:
+    status: todo
+    comment: >
+      Full coverage (95%+) requires integration tests for WS commands,
+      notification manager, and config flow. Planned for v3.0.0.
+
+  # ── Platinum ──────────────────────────────────────────────────────────────
+  async_dependency:
+    status: done
+    comment: >
+      Fully async — aiohttp for InfluxDB, async_track_state_change_event,
+      persistent ClientSession, all I/O awaited.
+  inject_websession:
+    status: exempt
+    comment: >
+      Integration creates its own aiohttp.ClientSession with InfluxDB
+      BasicAuth credentials. Cannot use HA's shared session as it
+      requires per-request authentication headers.
+  strict_typing:
+    status: todo
+    comment: >
+      Type hints are 100% present but mypy strict mode not yet verified.
+      Planned for v3.0.0 with CI/CD pipeline.

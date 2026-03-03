@@ -23,7 +23,7 @@ from typing import Any
 import aiohttp
 import urllib.parse
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryNotReady
+from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.event import async_track_state_change_event
@@ -84,6 +84,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         coordinator = PCStatisticsCoordinator(hass, entry)
+
+        # Verify InfluxDB is reachable before completing setup.
+        # Raises ConfigEntryNotReady if InfluxDB is down — HA will retry automatically.
+        await coordinator._async_verify_influxdb()
+
         await coordinator.async_config_entry_first_refresh()
 
         # Set up persistent store and notification manager
@@ -223,6 +228,34 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         hass.async_create_task(self._async_load_monthly_data())
 
         _LOGGER.debug("PCStatisticsCoordinator initialized (entry: %s)", config_entry.entry_id)
+
+    async def _async_verify_influxdb(self) -> None:
+        """Ping InfluxDB to verify connectivity at setup time.
+
+        Raises ConfigEntryNotReady if unreachable (HA will retry).
+        Raises ConfigEntryAuthFailed if credentials are wrong (HA prompts re-auth).
+        """
+        try:
+            async with self._http_session.get(
+                f"{self._influx_base_url}/ping",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 401:
+                    raise ConfigEntryAuthFailed(
+                        "InfluxDB authentication failed — check username and password"
+                    )
+                if resp.status != 204:
+                    raise ConfigEntryNotReady(
+                        f"InfluxDB ping returned unexpected status {resp.status}"
+                    )
+        except ConfigEntryAuthFailed:
+            raise
+        except ConfigEntryNotReady:
+            raise
+        except aiohttp.ClientError as err:
+            raise ConfigEntryNotReady(
+                f"Cannot connect to InfluxDB at {self._influx_base_url}: {err}"
+            ) from err
 
     async def async_shutdown(self) -> None:
         """Close the persistent HTTP session. Called on integration unload."""
@@ -499,11 +532,21 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         try:
             url = f"{self._influx_base_url}/write?db={self.config['database']}"
             async with self._http_session.post(url, data=point) as response:
+                if response.status == 401:
+                    _LOGGER.error(
+                        "InfluxDB authentication failed (401) — "
+                        "update credentials via Settings → Devices & Services → PC User Statistics → Reconfigure"
+                    )
+                    raise ConfigEntryAuthFailed(
+                        "InfluxDB authentication failed — reconfigure credentials"
+                    )
                 if response.status != 204:
                     _LOGGER.warning("InfluxDB write failed: HTTP %s", response.status)
                     return False
                 _LOGGER.debug("InfluxDB write OK: %s", point)
                 return True
+        except ConfigEntryAuthFailed:
+            raise
         except aiohttp.ClientError as err:
             _LOGGER.warning("InfluxDB write error: %s", err)
             return False
