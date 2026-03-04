@@ -1,7 +1,20 @@
 # File Name: notification_manager.py
-# Version: 2.3.0
+# Version: 2.5.1
 # Description: Evaluates notification rules and sends to HA Companion app.
-# Last Updated: March 1, 2026
+# Last Updated: March 4, 2026
+#
+# Fixes in 2.5.1:
+#   FIX 1: idle_pc trigger used coordinator.last_write_time as idle duration proxy.
+#           last_write_time reflects the last successful InfluxDB write — it resets
+#           whenever a write succeeds, even during an active session. This caused the
+#           idle timer to always show nearly 0s, so idle_pc never triggered correctly.
+#           Fix: coordinator now tracks self._idle_since separately, set when user
+#           logs out (current_user → None) and cleared when user logs in.
+#
+#   FIX 2: async_mark_sent wrote to disk on every coordinator poll (every 60s) while
+#           a rule was triggered. HA's Store debounces writes internally, but it's
+#           still unnecessary overhead. Batched: mark_sent in-memory immediately,
+#           flush to disk once after all rules are evaluated.
 
 from __future__ import annotations
 
@@ -20,6 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _fmt_time(seconds: float) -> str:
+    """Format seconds as human-readable string."""
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     if h > 0:
@@ -28,6 +42,7 @@ def _fmt_time(seconds: float) -> str:
 
 
 def _fmt_cost(dkk: float) -> str:
+    """Format DKK value as Danish decimal string."""
     return f"{dkk:.2f}".replace(".", ",")
 
 
@@ -39,9 +54,10 @@ class NotificationManager:
         self._store = store
 
     async def async_evaluate(self, coordinator: "PCStatisticsCoordinator") -> None:
-        """
-        Called on every coordinator update.
+        """Called on every coordinator update (every 60s).
+
         Checks each enabled rule against current state and fires if triggered.
+        Batches all store writes into a single flush at the end.
         """
         rules = self._store.get_rules()
         devices = self._store.get_devices()
@@ -55,6 +71,9 @@ class NotificationManager:
         acc_cost: float = data.get("acc_cost", 0.0)
         now = time.time()
 
+        # Track whether any rule fired so we can do a single store flush
+        any_sent = False
+
         for rule_id, rule in rules.items():
             if not rule.get("enabled"):
                 continue
@@ -63,22 +82,30 @@ class NotificationManager:
             trigger_value: float = float(rule.get("trigger_value", 0))
             user_targets: list[str] = rule.get("user_targets", [])
 
-            # ── idle_pc: no user logged in but power > threshold ──────────
+            # ── idle_pc: no user logged in but PC is drawing power ────────
             if trigger_type == "idle_minutes":
-                if current_user is None and coordinator.last_power > 10:
-                    await self._maybe_send(
-                        rule_id=rule_id,
-                        rule=rule,
-                        user="system",
-                        devices=devices,
-                        trigger_value=trigger_value,
-                        now=now,
-                        replacements={
-                            "{user}": "system",
-                            "{time}": _fmt_time(now - coordinator.last_write_time),
-                            "{cost}": _fmt_cost(acc_cost),
-                        },
-                    )
+                idle_since = coordinator._idle_since
+                if (
+                    current_user is None
+                    and coordinator.last_power > 10
+                    and idle_since is not None
+                ):
+                    idle_seconds = now - idle_since
+                    if idle_seconds >= trigger_value * 60:
+                        sent = await self._maybe_send(
+                            rule_id=rule_id,
+                            rule=rule,
+                            user="system",
+                            devices=devices,
+                            now=now,
+                            replacements={
+                                "{user}": "system",
+                                "{time}": _fmt_time(idle_seconds),
+                                "{cost}": _fmt_cost(acc_cost),
+                            },
+                        )
+                        if sent:
+                            any_sent = True
                 continue
 
             # ── user-based rules ──────────────────────────────────────────
@@ -93,19 +120,17 @@ class NotificationManager:
 
             if trigger_type == "session_minutes":
                 triggered = acc_time >= trigger_value * 60
-
             elif trigger_type == "session_cost":
                 triggered = acc_cost >= trigger_value
 
             if not triggered:
                 continue
 
-            await self._maybe_send(
+            sent = await self._maybe_send(
                 rule_id=rule_id,
                 rule=rule,
                 user=current_user,
                 devices=devices,
-                trigger_value=trigger_value,
                 now=now,
                 replacements={
                     "{user}": current_user.capitalize(),
@@ -113,6 +138,12 @@ class NotificationManager:
                     "{cost}": _fmt_cost(acc_cost),
                 },
             )
+            if sent:
+                any_sent = True
+
+        # FIX 2: Single store flush after all rules evaluated (not per-rule)
+        if any_sent:
+            await self._store.async_flush()
 
     async def _maybe_send(
         self,
@@ -120,25 +151,30 @@ class NotificationManager:
         rule: dict,
         user: str,
         devices: list[str],
-        trigger_value: float,
         now: float,
         replacements: dict[str, str],
-    ) -> None:
-        """Send if enough time has passed since last send (anti-spam)."""
+    ) -> bool:
+        """Send if anti-spam conditions are met. Returns True if notification was sent.
+
+        Marks sent in-memory immediately — caller batches the disk flush.
+        """
         last_sent = self._store.get_last_sent(rule_id, user)
         repeat: bool = rule.get("repeat", False)
-        repeat_interval: float = float(rule.get("repeat_interval", 60)) * 60  # minutes → seconds
+        repeat_interval: float = float(rule.get("repeat_interval", 60)) * 60  # min → sec
 
         # Non-repeating: only send once per session (reset when user changes)
         if not repeat and last_sent > 0:
-            return
+            return False
 
         # Repeating: respect interval
         if repeat and (now - last_sent) < repeat_interval:
-            return
+            return False
 
         await self._send(rule, devices, replacements)
-        await self._store.async_mark_sent(rule_id, user, now)
+
+        # Mark in-memory immediately — flush to disk happens in async_evaluate
+        self._store.mark_sent_in_memory(rule_id, user, now)
+        return True
 
     async def _send(
         self,
@@ -156,9 +192,9 @@ class NotificationManager:
 
         for service_path in devices:
             try:
-                # service_path = "notify.mobile_app_flemming_phone"
                 parts = service_path.split(".", 1)
                 if len(parts) != 2:
+                    _LOGGER.warning("Invalid service path '%s', skipping", service_path)
                     continue
                 domain, service = parts
                 await self._hass.services.async_call(

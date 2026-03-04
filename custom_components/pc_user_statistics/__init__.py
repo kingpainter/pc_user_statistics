@@ -1,7 +1,7 @@
 # File Name: __init__.py
-# Version: 2.5.0
+# Version: 2.5.2
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 3, 2026
+# Last Updated: March 4, 2026
 #
 # Changes in 2.4.1:
 #   FIX: Removed entry.add_update_listener(_async_options_updated).
@@ -16,6 +16,7 @@
 #        before the coordinator is torn down.
 
 from datetime import datetime, timedelta, timezone
+import asyncio
 import logging
 import time
 from typing import Any
@@ -25,7 +26,7 @@ import urllib.parse
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
@@ -45,6 +46,8 @@ from .const import (
     DEFAULT_USERS,
 )
 from .helpers import safe_float_from_state, parse_influxdb_response
+from .store import NotificationStore
+from .notification_manager import NotificationManager
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,30 +87,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         coordinator = PCStatisticsCoordinator(hass, entry)
+        store = NotificationStore(hass)
 
-        # Verify InfluxDB is reachable before completing setup.
-        # Raises ConfigEntryNotReady if InfluxDB is down — HA will retry automatically.
-        await coordinator._async_verify_influxdb()
+        # Verify InfluxDB connectivity and load persistent store in parallel.
+        # The two are completely independent — no reason to run them serially.
+        await asyncio.gather(
+            coordinator._async_verify_influxdb(),
+            store.async_load(),
+        )
 
         await coordinator.async_config_entry_first_refresh()
 
-        # Set up persistent store and notification manager
-        from .store import NotificationStore
-        from .notification_manager import NotificationManager
-        store = NotificationStore(hass)
-        await store.async_load()
         notification_manager = NotificationManager(hass, store)
 
-        hass.data.setdefault(DOMAIN, {})
-        hass.data[DOMAIN][entry.entry_id] = coordinator
+        hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
         hass.data[DOMAIN]["store"] = store
         hass.data[DOMAIN]["notification_manager"] = notification_manager
 
         await hass.config_entries.async_forward_entry_setups(entry, ["sensor"])
 
-        # ── Track only the two sensors we care about ───────────────────────
-        # async_track_state_change_event is far more efficient than the global
-        # EVENT_STATE_CHANGED bus — HA filters at the source, not in our code.
         entry.async_on_unload(
             async_track_state_change_event(
                 hass,
@@ -116,24 +114,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         )
 
-        # ── FIX: Removed entry.add_update_listener(_async_options_updated) ──
-        # The update listener called async_reload() immediately when options
-        # changed, killing the WebSocket connection before ws_save_config()
-        # could send its response. Reload is now handled exclusively by
-        # ws_save_config() via hass.async_create_task() after send_result().
-
-        # Register WebSocket API and sidebar panel
         from .websocket import async_register_websocket_commands
         from .panel import async_register_panel
         async_register_websocket_commands(hass)
         await async_register_panel(hass)
 
-        _LOGGER.info("PC User Statistics integration setup completed successfully")
+        _LOGGER.info("PC User Statistics setup completed successfully")
         return True
 
-    except Exception as err:
-        _LOGGER.exception("Failed to set up PC User Statistics integration: %s", err)
+    except (ConfigEntryAuthFailed, ConfigEntryNotReady):
         raise
+    except Exception as err:
+        _LOGGER.exception("Unexpected error setting up PC User Statistics: %s", err)
+        raise ConfigEntryNotReady(f"Unexpected setup error: {err}") from err
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -150,8 +143,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             from .panel import async_unregister_panel, async_unregister_cards_resource
             async_unregister_panel(hass)
             await async_unregister_cards_resource(hass)
-            hass.data[DOMAIN].pop(entry.entry_id, None)
-            _LOGGER.info("PC User Statistics integration unloaded successfully")
+
+            # Remove all DOMAIN keys — prevents stale store/notification_manager
+            # references leaking into the next reload cycle
+            domain_data = hass.data.get(DOMAIN, {})
+            domain_data.pop(entry.entry_id, None)
+            domain_data.pop("store", None)
+            domain_data.pop("notification_manager", None)
+
+            _LOGGER.info("PC User Statistics unloaded successfully")
         return unload_ok
 
     except Exception as err:
@@ -216,13 +216,25 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.last_write_time: float = time.time()
 
         # ── Cached entity IDs — read once at init, not on every state lookup ──
-        self._user_entity: str  = config_entry.data.get("user_entity",          USER_ENTITY)
-        self._watt_entity: str  = config_entry.data.get("watt_entity",          WATT_ENTITY)
-        self._device_entity: str = config_entry.data.get("device_power_entity", DEVICE_POWER_ENTITY)
-        self._price_entity: str = config_entry.data.get("price_entity",         PRICE_ENTITY)
+        self._user_entity: str   = config_entry.data.get("user_entity",          USER_ENTITY)
+        self._watt_entity: str   = config_entry.data.get("watt_entity",          WATT_ENTITY)
+        self._device_entity: str = config_entry.data.get("device_power_entity",  DEVICE_POWER_ENTITY)
+        self._price_entity: str  = config_entry.data.get("price_entity",         PRICE_ENTITY)
+
+        # Cache base URL — built once, reused for every InfluxDB request
+        self._influx_base_url: str = (
+            f"http://{config_entry.data['host']}:{config_entry.data['port']}"
+        )
 
         # ── Write buffer for failed InfluxDB writes ────────────────────────
         self.failed_writes: list[dict] = []
+
+        # Guard: prevents background retry tasks from running after unload
+        self._unloaded: bool = False
+
+        # Idle tracking: set when user logs out, cleared when user logs in.
+        # Used by idle_pc notification rule as the correct idle duration source.
+        self._idle_since: float | None = None
 
         # Load monthly data in the background — does NOT block coordinator init
         hass.async_create_task(self._async_load_monthly_data())
@@ -259,15 +271,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
     async def async_shutdown(self) -> None:
         """Close the persistent HTTP session. Called on integration unload."""
+        self._unloaded = True  # Stop any pending background retry tasks
         if not self._http_session.closed:
             await self._http_session.close()
             _LOGGER.debug("InfluxDB HTTP session closed")
 
     # ── InfluxDB helpers ───────────────────────────────────────────────────
-
-    @property
-    def _influx_base_url(self) -> str:
-        return f"http://{self.config['host']}:{self.config['port']}"
 
     async def _async_load_monthly_data(self, retry: int = 0) -> None:
         """Query InfluxDB for initial monthly sums and merge into self.monthly.
@@ -301,9 +310,14 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             field_mappings = {"time": 1, "energy": 2, "cost": 3}
             parsed_data = parse_influxdb_response(data, field_mappings)
 
+            # ADD InfluxDB totals on top of any in-memory deltas already accumulated
+            # since coordinator start. We cannot replace because the coordinator may
+            # have been running for up to 30s before this load completes, accumulating
+            # real deltas that are NOT yet in InfluxDB (written every 60s).
             for user, values in parsed_data.items():
                 if user in self.monthly:
-                    self.monthly[user].update(values)
+                    for key, influx_val in values.items():
+                        self.monthly[user][key] += float(influx_val or 0)
 
             self._monthly_loaded = True
             _LOGGER.info(
@@ -321,8 +335,10 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     retry + 1, max_retries, delay, err,
                 )
                 async def _retry():
-                    import asyncio
                     await asyncio.sleep(delay)
+                    if self._unloaded:
+                        _LOGGER.debug("Integration unloaded — aborting monthly data retry")
+                        return
                     await self._async_load_monthly_data(retry=retry + 1)
                 self.hass.async_create_task(_retry())
             else:
@@ -363,12 +379,16 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         if self.failed_writes:
             await self._retry_failed_writes()
 
-        await self._calculate_deltas(now, force_write=True)
-
-        # BUG FIX: update last_time after polling delta so the next 60s poll
-        # calculates delta from NOW, not from the previous poll or state-change.
-        # Without this, each poll accumulates time from an ever-growing window.
-        self.last_time = now
+        # Only write to InfluxDB once monthly data has loaded — avoids double-counting
+        # deltas that are already included in the InfluxDB monthly sum.
+        if self._monthly_loaded:
+            await self._calculate_deltas(now, force_write=True)
+            # Update last_time only when we actually calculated a delta.
+            # If monthly data isn't loaded yet, we skip the calculation entirely
+            # and must NOT advance last_time — otherwise those seconds are lost forever.
+            self.last_time = now
+        else:
+            _LOGGER.debug("Monthly data not yet loaded — skipping InfluxDB write this poll")
 
         # Evaluate notification rules
         try:
@@ -433,10 +453,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
             self.current_user = new_user
             if new_user:
+                # User logged in — clear idle timer, reset session accumulators
+                self._idle_since = None
                 self.acc_time = 0.0
                 self.acc_energy = 0.0
                 self.acc_cost = 0.0
                 self.last_power = self._get_power()
+            else:
+                # User logged out — start idle timer
+                self._idle_since = now
 
             # BUG FIX: reset last_time HERE so the new user's first delta
             # starts from this moment — not from whenever the previous user's
@@ -516,7 +541,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         cost_delta: float,
     ) -> None:
         """Build line-protocol point and write to InfluxDB. Buffers on failure."""
-        timestamp_ns = int(datetime.utcnow().timestamp() * 1_000_000_000)
+        timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
         point = (
             f"{MEASUREMENT},user={self.current_user} "
             f"power={power},time_delta={time_delta},"

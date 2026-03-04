@@ -1,7 +1,12 @@
 # File Name: store.py
-# Version: 2.3.0
+# Version: 2.5.1
 # Description: Persistent storage for notification rules using HA store (.storage).
-# Last Updated: March 1, 2026
+# Last Updated: March 4, 2026
+#
+# Changes in 2.5.1:
+#   - Added mark_sent_in_memory() — updates last_sent in RAM without disk write
+#   - Added async_flush() — single disk flush after all rules are evaluated
+#     Previously async_mark_sent() wrote to disk on every triggered rule (every 60s)
 
 from __future__ import annotations
 
@@ -88,11 +93,11 @@ class NotificationStore:
             await self._store.async_save(self._data)
         else:
             self._data = stored
-            # Add any new premade rules added in newer versions
+            # Add any new premade rules introduced in newer versions
             updated = False
             for rule in PREMADE_RULES:
-                if rule["id"] not in self._data["rules"]:
-                    self._data["rules"][rule["id"]] = {
+                if rule["id"] not in self._data.get("rules", {}):
+                    self._data.setdefault("rules", {})[rule["id"]] = {
                         **rule,
                         "enabled": False,
                         "user_targets": [],
@@ -110,11 +115,12 @@ class NotificationStore:
             rules[rule["id"]] = {
                 **rule,
                 "enabled": False,
-                "user_targets": [],  # Which users this rule applies to
+                "user_targets": [],
             }
         return {
             "rules": rules,
-            "devices": [],  # HA notify service names e.g. notify.mobile_app_flemming
+            "devices": [],
+            "last_sent": {},
         }
 
     # ── Rules ───────────────────────────────────────────────────────────────
@@ -129,9 +135,7 @@ class NotificationStore:
 
     async def async_save_rule(self, rule_id: str, config: dict[str, Any]) -> None:
         """Save (create or update) a rule."""
-        if "rules" not in self._data:
-            self._data["rules"] = {}
-        self._data["rules"][rule_id] = config
+        self._data.setdefault("rules", {})[rule_id] = config
         await self._store.async_save(self._data)
         _LOGGER.debug("Saved rule: %s", rule_id)
 
@@ -140,9 +144,8 @@ class NotificationStore:
         rule = self._data.get("rules", {}).get(rule_id)
         if not rule:
             return False
-        # Premade rules cannot be deleted — only disabled
         if rule_id in {r["id"] for r in PREMADE_RULES}:
-            return False
+            return False  # Premade rules cannot be deleted — only disabled
         del self._data["rules"][rule_id]
         await self._store.async_save(self._data)
         _LOGGER.debug("Deleted custom rule: %s", rule_id)
@@ -176,16 +179,34 @@ class NotificationStore:
         await self._store.async_save(self._data)
         _LOGGER.info("Saved %d notification devices", len(devices))
 
-    # ── Sent tracking (avoid spam) ───────────────────────────────────────────
+    # ── Sent tracking (anti-spam) ────────────────────────────────────────────
 
     def get_last_sent(self, rule_id: str, user: str) -> float:
         """Return timestamp of last sent notification for rule+user."""
         key = f"{rule_id}_{user}"
         return self._data.get("last_sent", {}).get(key, 0.0)
 
+    def mark_sent_in_memory(self, rule_id: str, user: str, timestamp: float) -> None:
+        """Update last_sent in RAM immediately — no disk write.
+
+        Call async_flush() after all rules are evaluated to batch the write.
+        """
+        self._data.setdefault("last_sent", {})[f"{rule_id}_{user}"] = timestamp
+
+    async def async_flush(self) -> None:
+        """Persist current in-memory state to disk.
+
+        Called once after all notification rules are evaluated, rather than
+        writing on every individual rule trigger.
+        """
+        await self._store.async_save(self._data)
+        _LOGGER.debug("Notification store flushed to disk")
+
     async def async_mark_sent(self, rule_id: str, user: str, timestamp: float) -> None:
-        """Mark a notification as sent."""
-        if "last_sent" not in self._data:
-            self._data["last_sent"] = {}
-        self._data["last_sent"][f"{rule_id}_{user}"] = timestamp
+        """Mark a notification as sent and persist immediately.
+
+        Use mark_sent_in_memory() + async_flush() for batch evaluation.
+        This method is kept for backwards compatibility and single-shot sends.
+        """
+        self.mark_sent_in_memory(rule_id, user, timestamp)
         await self._store.async_save(self._data)
