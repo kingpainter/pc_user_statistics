@@ -202,11 +202,21 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.acc_cost: float = 0.0
 
         # ── Monthly totals (in-memory, loaded from InfluxDB at startup) ────
+        # IMPORTANT: Do NOT accumulate deltas directly into self.monthly until
+        # _async_load_monthly_data() completes. Until then, all deltas go into
+        # self._pending, which is merged into self.monthly after the InfluxDB
+        # load. This prevents double-counting: if a delta is written to InfluxDB
+        # before the load completes, it would appear in both the InfluxDB SUM
+        # and self.monthly if we accumulated there directly.
         self.monthly: dict[str, dict[str, float]] = {
             user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
             for user in self.tracked_users
         }
-        # Track whether initial InfluxDB load has completed
+        self._pending: dict[str, dict[str, float]] = {
+            user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+            for user in self.tracked_users
+        }
+        # True once _async_load_monthly_data() has successfully set self.monthly
         self._monthly_loaded: bool = False
 
         # ── Timing ────────────────────────────────────────────────────────
@@ -310,15 +320,28 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             field_mappings = {"time": 1, "energy": 2, "cost": 3}
             parsed_data = parse_influxdb_response(data, field_mappings)
 
-            # ADD InfluxDB totals on top of any in-memory deltas already accumulated
-            # since coordinator start. We cannot replace because the coordinator may
-            # have been running for up to 30s before this load completes, accumulating
-            # real deltas that are NOT yet in InfluxDB (written every 60s).
+            # REPLACE self.monthly with the authoritative InfluxDB totals,
+            # then add any deltas that accumulated in self._pending while the
+            # load was in progress. This is the only safe pattern:
+            #   - REPLACE avoids double-counting InfluxDB data
+            #   - Adding _pending captures any real activity since startup
+            new_monthly: dict[str, dict[str, float]] = {
+                user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+                for user in self.tracked_users
+            }
             for user, values in parsed_data.items():
-                if user in self.monthly:
-                    for key, influx_val in values.items():
-                        self.monthly[user][key] += float(influx_val or 0)
+                if user in new_monthly:
+                    for key, val in values.items():
+                        new_monthly[user][key] = float(val or 0)
 
+            # Merge in any deltas accumulated before load completed
+            for user in self.tracked_users:
+                pending = self._pending.get(user, {})
+                for key in ("time", "energy", "cost"):
+                    new_monthly[user][key] += pending.get(key, 0.0)
+
+            self.monthly = new_monthly
+            self._pending = {}  # No longer needed — monthly is now authoritative
             self._monthly_loaded = True
             _LOGGER.info(
                 "Monthly data loaded from InfluxDB: %s",
@@ -368,6 +391,10 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 self.last_month, current_month,
             )
             self.monthly = {
+                user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+                for user in self.tracked_users
+            }
+            self._pending = {
                 user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
                 for user in self.tracked_users
             }
@@ -504,10 +531,13 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.acc_energy += energy_delta
         self.acc_cost   += cost_delta
 
-        if self.current_user in self.monthly:
-            self.monthly[self.current_user]["time"]   += delta_time
-            self.monthly[self.current_user]["energy"] += energy_delta
-            self.monthly[self.current_user]["cost"]   += cost_delta
+        # Before InfluxDB load completes, accumulate into _pending.
+        # After load, accumulate directly into monthly (which is now authoritative).
+        target = self.monthly if self._monthly_loaded else self._pending
+        if self.current_user in target:
+            target[self.current_user]["time"]   += delta_time
+            target[self.current_user]["energy"] += energy_delta
+            target[self.current_user]["cost"]   += cost_delta
 
         time_since_write = now - self.last_write_time
         if force_write or time_since_write >= WRITE_THRESHOLD:
@@ -621,11 +651,25 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
     def _get_data(self) -> dict[str, Any]:
         """Return current data snapshot for coordinator listeners and sensors."""
+        # If monthly load hasn't completed, combine monthly (zeroes) + pending
+        # so the panel shows real accumulated values rather than 0 during startup.
+        if self._monthly_loaded:
+            monthly_view = self.monthly
+        else:
+            monthly_view = {
+                user: {
+                    "time":   self.monthly[user]["time"]   + self._pending.get(user, {}).get("time", 0.0),
+                    "energy": self.monthly[user]["energy"] + self._pending.get(user, {}).get("energy", 0.0),
+                    "cost":   self.monthly[user]["cost"]   + self._pending.get(user, {}).get("cost", 0.0),
+                }
+                for user in self.tracked_users
+            }
+
         return {
             "current_user":   self.current_user,
             "acc_time":       self.acc_time,
             "acc_energy":     self.acc_energy,
             "acc_cost":       self.acc_cost,
-            "monthly":        self.monthly,
+            "monthly":        monthly_view,
             "monthly_loaded": self._monthly_loaded,
         }
