@@ -85,7 +85,13 @@ class NotificationStore:
 
     async def async_load(self) -> None:
         """Load data from storage, seeding premade rules if first run."""
-        stored = await self._store.async_load()
+        try:
+            stored = await self._store.async_load()
+        except Exception as err:
+            _LOGGER.error(
+                "Failed to load notification store (corrupt storage?) — seeding defaults: %s", err
+            )
+            stored = None
 
         if stored is None:
             _LOGGER.info("No notification store found — seeding premade rules")
@@ -93,6 +99,8 @@ class NotificationStore:
             await self._store.async_save(self._data)
         else:
             self._data = stored
+            # Ensure last_sent key exists for older installs upgrading from v2.3.0
+            self._data.setdefault("last_sent", {})
             # Add any new premade rules introduced in newer versions
             updated = False
             for rule in PREMADE_RULES:
@@ -126,8 +134,12 @@ class NotificationStore:
     # ── Rules ───────────────────────────────────────────────────────────────
 
     def get_rules(self) -> dict[str, Any]:
-        """Return all rules."""
-        return self._data.get("rules", {})
+        """Return a shallow copy of all rules.
+
+        Returns a copy rather than the live dict to prevent RuntimeError if a
+        WebSocket handler modifies rules while notification_manager is iterating.
+        """
+        return dict(self._data.get("rules", {}))
 
     def get_rule(self, rule_id: str) -> dict[str, Any] | None:
         """Return a single rule by ID."""
@@ -193,6 +205,27 @@ class NotificationStore:
         """
         self._data.setdefault("last_sent", {})[f"{rule_id}_{user}"] = timestamp
 
+    def reset_session_sent(self, user: str) -> None:
+        """Clear last_sent for all non-repeating rules for a user.
+
+        Called when a user's session starts so non-repeating rules (repeat=False)
+        fire again in the new session. Without this, a non-repeating rule that
+        fired once will NEVER fire again for that user — even the next day.
+
+        Repeating rules are NOT reset here — they use their own repeat_interval.
+        """
+        rules = self._data.get("rules", {})
+        last_sent = self._data.get("last_sent", {})
+        changed = False
+        for rule_id, rule in rules.items():
+            if not rule.get("repeat", False):
+                key = f"{rule_id}_{user}"
+                if key in last_sent:
+                    del last_sent[key]
+                    changed = True
+        if changed:
+            _LOGGER.debug("Cleared non-repeating last_sent for user '%s' on new session", user)
+
     async def async_flush(self) -> None:
         """Persist current in-memory state to disk.
 
@@ -206,7 +239,7 @@ class NotificationStore:
         """Mark a notification as sent and persist immediately.
 
         Use mark_sent_in_memory() + async_flush() for batch evaluation.
-        This method is kept for backwards compatibility and single-shot sends.
+        This method is kept for single-shot sends (e.g. test notifications).
         """
         self.mark_sent_in_memory(rule_id, user, timestamp)
         await self._store.async_save(self._data)

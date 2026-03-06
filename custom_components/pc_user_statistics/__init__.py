@@ -486,6 +486,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 self.acc_energy = 0.0
                 self.acc_cost = 0.0
                 self.last_power = self._get_power()
+
+                # Reset non-repeating notification rules so they fire again
+                # in this new session (they would otherwise never fire again)
+                store = self.hass.data.get(DOMAIN, {}).get("store")
+                if store:
+                    store.reset_session_sent(new_user)
             else:
                 # User logged out — start idle timer
                 self._idle_since = now
