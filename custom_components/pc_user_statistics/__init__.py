@@ -1,7 +1,7 @@
 # File Name: __init__.py
-# Version: 2.5.2
+# Version: 2.5.3
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 4, 2026
+# Last Updated: March 6, 2026
 #
 # Changes in 2.4.1:
 #   FIX: Removed entry.add_update_listener(_async_options_updated).
@@ -125,7 +125,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except (ConfigEntryAuthFailed, ConfigEntryNotReady):
         raise
     except Exception as err:
-        _LOGGER.exception("Unexpected error setting up PC User Statistics: %s", err)
+        # Don't log at error/warning here — HA logs ConfigEntryNotReady message automatically.
+        # Use debug so we don't spam the log on transient failures.
+        _LOGGER.debug("Unexpected error setting up PC User Statistics: %s", err, exc_info=True)
         raise ConfigEntryNotReady(f"Unexpected setup error: {err}") from err
 
 

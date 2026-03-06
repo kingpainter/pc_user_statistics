@@ -1,7 +1,7 @@
 {
   "domain": "pc_user_statistics",
   "name": "PC User Statistics",
-  "version": "2.5.0",
+  "version": "2.5.3",
   "documentation": "https://github.com/kingpainter/pc_user_statistics",
   "issue_tracker": "https://github.com/kingpainter/pc_user_statistics/issues",
   "requirements": [
@@ -9,7 +9,8 @@
   ],
   "dependencies": [
     "frontend",
-    "http"
+    "http",
+    "system_health"
   ],
   "codeowners": [
     "@kingpainter"

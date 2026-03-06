@@ -1024,28 +1024,91 @@ class PcUserStatisticsPanel extends HTMLElement {
   _adminHTML() {
     const sys = this._system;
     if (!sys) return `<div class="empty-state">Indlæser...</div>`;
-    const bufPct   = Math.round(sys.buffer_size/sys.buffer_max*100);
-    const bufColor = bufPct>75?"#ef4444":bufPct>40?"#f59e0b":"#10b981";
 
+    // ── Write buffer ───────────────────────────────────────────
+    const bufPct   = Math.round(sys.buffer_size / sys.buffer_max * 100);
+    const bufColor = bufPct > 75 ? "#ef4444" : bufPct > 40 ? "#f59e0b" : "#10b981";
+
+    // ── System health indicators ───────────────────────────────
+    const monthlyOk = sys.monthly_loaded === true;
+    const bufOk     = sys.buffer_size === 0;
+    const writeOk   = sys.last_write && sys.last_write !== "aldrig";
+
+    // Overall health: all green = ok, any red = warning
+    const allOk = monthlyOk && bufOk;
+    const healthColor  = allOk ? "#10b981" : "#f59e0b";
+    const healthIcon   = allOk ? "✅" : "⚠️";
+    const healthLabel  = allOk ? "Alt OK" : "Kræver opmærksomhed";
+
+    const healthRows = [
+      {
+        icon: monthlyOk ? "✅" : "⏳",
+        label: "Monthly data",
+        value: monthlyOk ? "Indlæst" : "Afventer InfluxDB…",
+        ok: monthlyOk,
+      },
+      {
+        icon: bufOk ? "✅" : "⚠️",
+        label: "Write buffer",
+        value: bufOk ? "Tom" : `${sys.buffer_size} punkter venter`,
+        ok: bufOk,
+      },
+      {
+        icon: writeOk ? "✅" : "⏳",
+        label: "Seneste write",
+        value: sys.last_write || "aldrig",
+        ok: writeOk,
+      },
+      {
+        icon: "👤",
+        label: "Aktiv bruger",
+        value: sys.current_user ? sys.current_user.charAt(0).toUpperCase() + sys.current_user.slice(1) : "Ingen",
+        ok: true,
+      },
+    ].map(r => `
+      <div class="health-row">
+        <span class="health-icon">${r.icon}</span>
+        <span class="health-label">${r.label}</span>
+        <span class="health-value" style="color:${r.ok ? "var(--text)" : "#f59e0b"}">${this._esc(r.value)}</span>
+      </div>`).join("");
+
+    // ── Info cards ─────────────────────────────────────────────
     const cards = [
-      ["Version", sys.version],
+      ["Version",      sys.version],
       ["InfluxDB host", `${sys.influxdb_host}:${sys.influxdb_port}`],
-      ["Database", sys.influxdb_database],
-      ["Brugere", (sys.tracked_users||[]).join(", ")],
-    ].map(([l,v])=>`<div class="admin-card"><div class="admin-card-label">${l}</div><div class="admin-card-value">${this._esc(v)}</div></div>`).join("");
+      ["Database",     sys.influxdb_database],
+      ["Brugere",      (sys.tracked_users || []).join(", ")],
+    ].map(([l, v]) => `
+      <div class="admin-card">
+        <div class="admin-card-label">${l}</div>
+        <div class="admin-card-value">${this._esc(v)}</div>
+      </div>`).join("");
 
-    const mapRows = Object.entries(sys.user_map||{}).map(([k,v])=>`
+    const mapRows = Object.entries(sys.user_map || {}).map(([k, v]) => `
       <div class="mapping-row"><code>${this._esc(k)}</code><span>${this._esc(v)}</span></div>`).join("");
 
     return `
-      <div class="section-title">System</div>
+      <div class="section-title">
+        System Health
+        <span class="health-badge" style="background:${healthColor}22;color:${healthColor};border:1px solid ${healthColor}44">
+          ${healthIcon} ${healthLabel}
+        </span>
+      </div>
+      <div class="health-card">
+        ${healthRows}
+      </div>
+
+      <div class="section-title">System info</div>
       <div class="admin-grid">${cards}</div>
 
       <div class="section-title">Write Buffer</div>
       <div class="buffer-card">
-        <div class="buffer-header"><span>Bufferede writes</span><span style="color:${bufColor};font-weight:600">${sys.buffer_size} / ${sys.buffer_max}</span></div>
+        <div class="buffer-header">
+          <span>Bufferede writes</span>
+          <span style="color:${bufColor};font-weight:600">${sys.buffer_size} / ${sys.buffer_max}</span>
+        </div>
         <div class="buffer-bar-bg"><div class="buffer-bar-fill" style="width:${bufPct}%;background:${bufColor}"></div></div>
-        <div class="buffer-hint">${sys.buffer_size===0
+        <div class="buffer-hint">${sys.buffer_size === 0
           ? `<span style="color:#10b981">✅ Ingen fejlede writes</span>`
           : `<span style="color:#f59e0b">⚠️ ${sys.buffer_size} punkter venter</span>`}</div>
       </div>
@@ -1490,6 +1553,15 @@ class PcUserStatisticsPanel extends HTMLElement {
     .admin-card { background:var(--card2); border-radius:10px; padding:14px; }
     .admin-card-label { font-size:11px; color:var(--subtext); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
     .admin-card-value { font-size:14px; font-weight:600; word-break:break-all; }
+    .health-badge { display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:600;
+      padding:2px 8px; border-radius:20px; margin-left:8px; vertical-align:middle; }
+    .health-card { background:var(--card2); border-radius:12px; overflow:hidden; margin-bottom:4px; }
+    .health-row { display:grid; grid-template-columns:24px 1fr auto; align-items:center;
+      gap:8px; padding:11px 14px; border-bottom:1px solid var(--divider); font-size:13px; }
+    .health-row:last-child { border-bottom:none; }
+    .health-icon { font-size:14px; text-align:center; }
+    .health-label { color:var(--subtext); }
+    .health-value { font-weight:600; text-align:right; }
     .buffer-card { background:var(--card2); border-radius:12px; padding:16px; margin-bottom:4px; }
     .buffer-header { display:flex; justify-content:space-between; font-size:14px; margin-bottom:10px; }
     .buffer-bar-bg { height:8px; background:var(--divider); border-radius:4px; overflow:hidden; }

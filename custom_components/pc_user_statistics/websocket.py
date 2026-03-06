@@ -1,7 +1,7 @@
 # File Name: websocket.py
-# Version: 2.5.0
+# Version: 2.5.3
 # Description: WebSocket API for the PC User Statistics panel.
-# Last Updated: March 3, 2026
+# Last Updated: March 6, 2026
 #
 # Fixes in 2.4.1:
 #   FIX 1: ws_save_config — send_result BEFORE scheduling reload via async_create_task.
@@ -88,6 +88,21 @@ def ws_get_system(hass, connection, msg):
         connection.send_error(msg["id"], "not_ready", "Integration not ready"); return
     try:
         cfg = coordinator.config
+        now = datetime.now(timezone.utc).timestamp()
+
+        # Last write — human-readable age
+        lw = coordinator.last_write_time
+        if lw:
+            delta = now - lw
+            if delta < 60:
+                last_write_str = f"{int(delta)}s siden"
+            elif delta < 3600:
+                last_write_str = f"{int(delta // 60)}m siden"
+            else:
+                last_write_str = f"{int(delta // 3600)}t {int((delta % 3600) // 60)}m siden"
+        else:
+            last_write_str = "aldrig"
+
         connection.send_result(msg["id"], {
             "version":            __version__,
             "influxdb_host":      cfg.get("host", "unknown"),
@@ -97,6 +112,11 @@ def ws_get_system(hass, connection, msg):
             "buffer_max":         100,
             "tracked_users":      coordinator.tracked_users,
             "user_map":           coordinator.user_map,
+            # ── Health metrics ──────────────────────────────────────
+            "monthly_loaded":     coordinator._monthly_loaded,
+            "current_user":       coordinator.current_user,
+            "last_write":         last_write_str,
+            "pending_size":       len(coordinator._pending) if not coordinator._monthly_loaded else 0,
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
