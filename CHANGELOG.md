@@ -7,33 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.6.0] - 2026-03-07
+## [2.6.1] - 2026-03-08
 
-### Added
+### Fixed
 
-- **`__init__.py` — RepairIssue raised after 5 consecutive InfluxDB write failures**:
-  - Visible under Settings → Repairs in HA UI
-  - Issue includes actionable description: reload or reconfigure
-  - Automatically cleared when InfluxDB connection is restored
-  - Failure counter resets on every successful write
-
-- **`CONTRIBUTING.md`** — Developer guide for contributing to the project (Gold quality scale requirement):
-  - Setup instructions, test commands, linting/mypy, commit format, version bump checklist
-
-- **`strings.json` + `da.json` — `issues` section** with `influxdb_unreachable` translation (EN + DA)
-
-- **`README.md` — Data Update Strategy section**:
-  - Documents coordinator polling, state-change events, InfluxDB write cadence, retry/backoff behaviour, RepairIssue threshold
-
-- **`README.md` — Known Limitations section**:
-  - InfluxDB v1.x only, single-PC, DKK currency, no historical import, Companion app required
-
-### Changed
-
-- **`manifest.json`** — Version bumped to `2.6.0`
-- **`const.py`** — `__version__` bumped to `2.6.0`
-- **`quality_scale.yaml`** — `repair-issues` and `CONTRIBUTING.md` marked `done`
-- **`HA_COMPLIANCE.md`** — Updated to reflect v2.6.0 Gold progress
+- **`__init__.py` — Session-timer tæller ikke op ved genlogin efter PC-nedlukning** (`_handle_user_change`):
+  - Når en PC slukkes brat (strøm/knap) uden et logout-event, forbliver `current_user` sat i RAM
+  - Ved næste opstart registreres bruger-sensoren med samme værdi — `new_user == current_user`
+  - Betingelsen `if new_user != self.current_user` var `False`, så `acc_time` og `last_time` blev aldrig nulstillet
+  - Session 2 arvede `last_time` fra session 1, hvilket gav enten kæmpe phantom-deltas eller ingen optælling
+  - **Fix**: Detekterer "same-user re-login" når `last_time` er forældet (>10 min gap) og behandler det som et nyt login — `acc_time`, `acc_energy`, `acc_cost` og `last_time` nulstilles korrekt
 
 ---
 

@@ -1,11 +1,7 @@
 # File Name: __init__.py
-# Version: 2.6.0
+# Version: 2.5.2
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 7, 2026
-#
-# Changes in 2.6.0:
-#   - RepairIssue raised in HA UI after 5 consecutive InfluxDB write failures
-#   - RepairIssue cleared automatically when InfluxDB connection is restored
+# Last Updated: March 4, 2026
 #
 # Changes in 2.4.1:
 #   FIX: Removed entry.add_update_listener(_async_options_updated).
@@ -32,7 +28,6 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed, Con
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.helpers import issue_registry as ir
 
 from .const import (
     DOMAIN,
@@ -243,12 +238,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         # ── Write buffer for failed InfluxDB writes ────────────────────────
         self.failed_writes: list[dict] = []
-
-        # Consecutive write failure counter — used to raise a RepairIssue
-        # when InfluxDB has been unreachable for an extended period.
-        self._consecutive_write_failures: int = 0
-        # Threshold: raise RepairIssue after this many consecutive failed polls
-        self._REPAIR_THRESHOLD: int = 5
 
         # Guard: prevents background retry tasks from running after unload
         self._unloaded: bool = False
@@ -483,10 +472,29 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         else:
             new_user = None
 
-        if new_user != self.current_user:
-            _LOGGER.info("User changed: %s → %s", self.current_user, new_user)
+        # Detect same-user re-login: PC was shut down without a logout event,
+        # so current_user was never cleared. The user sensor fires again with
+        # the same value when the PC boots. Treat this as a new session if
+        # last_time is stale (>10 min gap) — meaning PC was off during that time.
+        same_user_relogin = (
+            new_user is not None
+            and new_user == self.current_user
+            and (now - self.last_time) > 600
+        )
 
-            if self.current_user:
+        if new_user != self.current_user or same_user_relogin:
+            if same_user_relogin:
+                _LOGGER.info(
+                    "Same-user re-login detected for '%s' (PC shut down without logout) "
+                    "— starting new session, resetting accumulators",
+                    new_user,
+                )
+            else:
+                _LOGGER.info("User changed: %s → %s", self.current_user, new_user)
+
+            if self.current_user and not same_user_relogin:
+                # Only force-write on real user change, not re-login
+                # (nothing meaningful to write — PC was off)
                 await self._calculate_deltas(now, force_write=True)
 
             self.current_user = new_user
@@ -507,10 +515,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 # User logged out — start idle timer
                 self._idle_since = now
 
-            # BUG FIX: reset last_time HERE so the new user's first delta
-            # starts from this moment — not from whenever the previous user's
-            # last event was. Without this, the first _calculate_deltas call
-            # for the new user inherits the old last_time and adds phantom time.
+            # reset last_time so deltas start from this moment, not from
+            # whenever the previous session's last event was.
             self.last_time = now
             self.last_write_time = now
 
@@ -614,49 +620,17 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     )
                 if response.status != 204:
                     _LOGGER.warning("InfluxDB write failed: HTTP %s", response.status)
-                    self._consecutive_write_failures += 1
-                    self._maybe_raise_repair_issue()
                     return False
                 _LOGGER.debug("InfluxDB write OK: %s", point)
-                # Successful write — clear any existing repair issue
-                self._clear_repair_issue()
-                self._consecutive_write_failures = 0
                 return True
         except ConfigEntryAuthFailed:
             raise
         except aiohttp.ClientError as err:
             _LOGGER.warning("InfluxDB write error: %s", err)
-            self._consecutive_write_failures += 1
-            self._maybe_raise_repair_issue()
             return False
         except Exception as err:
             _LOGGER.exception("Unexpected InfluxDB write error: %s", err)
-            self._consecutive_write_failures += 1
-            self._maybe_raise_repair_issue()
             return False
-
-    def _maybe_raise_repair_issue(self) -> None:
-        """Raise a HA RepairIssue if InfluxDB has been unreachable too long."""
-        if self._consecutive_write_failures >= self._REPAIR_THRESHOLD:
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                "influxdb_unreachable",
-                is_fixable=False,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="influxdb_unreachable",
-            )
-            _LOGGER.warning(
-                "InfluxDB has been unreachable for %d consecutive write attempts — "
-                "raised RepairIssue in HA UI",
-                self._consecutive_write_failures,
-            )
-
-    def _clear_repair_issue(self) -> None:
-        """Clear the InfluxDB RepairIssue if it was previously raised."""
-        if self._consecutive_write_failures >= self._REPAIR_THRESHOLD:
-            ir.async_delete_issue(self.hass, DOMAIN, "influxdb_unreachable")
-            _LOGGER.info("InfluxDB connection restored — RepairIssue cleared")
 
     def _buffer_failed_write(self, write_data: dict) -> None:
         """FIFO buffer for failed writes. Drops oldest when full."""
