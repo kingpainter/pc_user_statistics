@@ -1,12 +1,12 @@
 # File Name: panel.py
-# Version: 2.4.1
+# Version: 2.5.0
 # Description: Panel and Lovelace card registration for PC User Statistics.
 #              Registers the sidebar panel (admin only) and the custom Lovelace
 #              cards as static HTTP paths. Cards auto-register in the Lovelace
 #              picker via window.customCards in the JS file itself.
 # Last Updated: March 2, 2026
 #
-# Fix in 2.4.1:
+# Fix in 2.5.0:
 #   FIX: async_unregister_panel() now clears hass.data[DOMAIN]["_panel_registered"].
 #        Previously the flag survived integration reload: unload cleared the panel
 #        from the sidebar but left the flag True, so async_register_panel() on the

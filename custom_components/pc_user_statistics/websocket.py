@@ -1,26 +1,14 @@
 # File Name: websocket.py
-# Version: 2.5.3
+# Version: 2.5.0
 # Description: WebSocket API for the PC User Statistics panel.
-# Last Updated: March 6, 2026
-#
-# Fixes in 2.4.1:
-#   FIX 1: ws_save_config — send_result BEFORE scheduling reload via async_create_task.
-#           Previously async_update_entry triggered a synchronous reload that killed
-#           the WebSocket connection before the response could be sent → crash + no save.
-#   FIX 2: ws_get_config — return raw user_mappings from entry.options (preserves ha_user
-#           objects), not coordinator.user_map (which strips ha_user after normalization).
-#   FIX 3: _query_history — use coordinator's persistent HTTP session instead of
-#           creating a new aiohttp.ClientSession per call.
+# Last Updated: March 7, 2026
 
 import logging
-import urllib.parse
-from datetime import datetime, timedelta, timezone
-
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import websocket_api
 
-from .const import DOMAIN, CONF_USER_MAPPINGS, CONF_TRACKED_USERS, __version__
+from .const import DOMAIN, __version__
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,8 +42,6 @@ def _get_notification_manager(hass):
     return hass.data.get(DOMAIN, {}).get("notification_manager")
 
 
-# ── Stats ─────────────────────────────────────────────────────────────────────
-
 @websocket_api.websocket_command({"type": f"{DOMAIN}/get_stats"})
 @callback
 def ws_get_stats(hass, connection, msg):
@@ -65,20 +51,18 @@ def ws_get_stats(hass, connection, msg):
     try:
         data = coordinator.data or {}
         connection.send_result(msg["id"], {
-            "current_user":   data.get("current_user"),
-            "acc_time":       data.get("acc_time",    0.0),
-            "acc_energy":     data.get("acc_energy",  0.0),
-            "acc_cost":       data.get("acc_cost",    0.0),
-            "monthly":        data.get("monthly",     {}),
-            "monthly_loaded": data.get("monthly_loaded", False),
-            "tracked_users":  coordinator.tracked_users,
-            "user_map":       coordinator.user_map,
+            "current_user": data.get("current_user"),
+            "acc_time": data.get("acc_time", 0.0),
+            "acc_energy": data.get("acc_energy", 0.0),
+            "acc_cost": data.get("acc_cost", 0.0),
+            "monthly": data.get("monthly", {}),
+            "tracked_users": coordinator.tracked_users,
+            "user_map": coordinator.user_map,
+            "monthly_loaded": coordinator._monthly_loaded,
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
 
-
-# ── System ────────────────────────────────────────────────────────────────────
 
 @websocket_api.websocket_command({"type": f"{DOMAIN}/get_system"})
 @callback
@@ -88,41 +72,19 @@ def ws_get_system(hass, connection, msg):
         connection.send_error(msg["id"], "not_ready", "Integration not ready"); return
     try:
         cfg = coordinator.config
-        now = datetime.now(timezone.utc).timestamp()
-
-        # Last write — human-readable age
-        lw = coordinator.last_write_time
-        if lw:
-            delta = now - lw
-            if delta < 60:
-                last_write_str = f"{int(delta)}s siden"
-            elif delta < 3600:
-                last_write_str = f"{int(delta // 60)}m siden"
-            else:
-                last_write_str = f"{int(delta // 3600)}t {int((delta % 3600) // 60)}m siden"
-        else:
-            last_write_str = "aldrig"
-
         connection.send_result(msg["id"], {
-            "version":            __version__,
-            "influxdb_host":      cfg.get("host", "unknown"),
-            "influxdb_port":      cfg.get("port", 8086),
-            "influxdb_database":  cfg.get("database", "unknown"),
-            "buffer_size":        len(coordinator.failed_writes),
-            "buffer_max":         100,
-            "tracked_users":      coordinator.tracked_users,
-            "user_map":           coordinator.user_map,
-            # ── Health metrics ──────────────────────────────────────
-            "monthly_loaded":     coordinator._monthly_loaded,
-            "current_user":       coordinator.current_user,
-            "last_write":         last_write_str,
-            "pending_size":       len(coordinator._pending) if not coordinator._monthly_loaded else 0,
+            "version": __version__,
+            "influxdb_host": cfg.get("host", "unknown"),
+            "influxdb_port": cfg.get("port", 8086),
+            "influxdb_database": cfg.get("database", "unknown"),
+            "buffer_size": len(coordinator.failed_writes),
+            "buffer_max": 100,
+            "tracked_users": coordinator.tracked_users,
+            "user_map": coordinator.user_map,
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
 
-
-# ── Notifications ─────────────────────────────────────────────────────────────
 
 @websocket_api.websocket_command({"type": f"{DOMAIN}/get_notifications"})
 @callback
@@ -132,8 +94,8 @@ def ws_get_notifications(hass, connection, msg):
         connection.send_error(msg["id"], "not_ready", "Store not ready"); return
     try:
         connection.send_result(msg["id"], {
-            "rules":             store.get_rules(),
-            "devices":           store.get_devices(),
+            "rules": store.get_rules(),
+            "devices": store.get_devices(),
             "available_devices": store.get_available_mobile_apps(hass),
         })
     except Exception as err:
@@ -143,7 +105,7 @@ def ws_get_notifications(hass, connection, msg):
 @websocket_api.websocket_command({
     "type": f"{DOMAIN}/save_notification",
     vol.Required("rule_id"): str,
-    vol.Required("config"):  dict,
+    vol.Required("config"): dict,
 })
 @websocket_api.async_response
 async def ws_save_notification(hass, connection, msg):
@@ -178,7 +140,7 @@ async def ws_delete_notification(hass, connection, msg):
 @websocket_api.websocket_command({
     "type": f"{DOMAIN}/test_notification",
     vol.Required("rule_id"): str,
-    vol.Required("user"):    str,
+    vol.Required("user"): str,
 })
 @websocket_api.async_response
 async def ws_test_notification(hass, connection, msg):
@@ -194,8 +156,6 @@ async def ws_test_notification(hass, connection, msg):
         connection.send_error(msg["id"], "unknown_error", str(err))
 
 
-# ── Devices ───────────────────────────────────────────────────────────────────
-
 @websocket_api.websocket_command({"type": f"{DOMAIN}/get_devices"})
 @callback
 def ws_get_devices(hass, connection, msg):
@@ -205,7 +165,7 @@ def ws_get_devices(hass, connection, msg):
     try:
         connection.send_result(msg["id"], {
             "configured": store.get_devices(),
-            "available":  store.get_available_mobile_apps(hass),
+            "available": store.get_available_mobile_apps(hass),
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
@@ -250,12 +210,11 @@ async def ws_get_history(hass, connection, msg):
 
 
 async def _query_history(coordinator, days: int) -> dict:
-    """Run InfluxDB GROUP BY time(1d) query and return structured data.
+    """Run InfluxDB GROUP BY time(1d) query and return structured data."""
+    import aiohttp, urllib.parse
+    from datetime import datetime, timedelta, timezone
 
-    Uses coordinator's persistent HTTP session instead of creating
-    a new aiohttp.ClientSession on every call.
-    """
-    cfg   = coordinator.config
+    cfg = coordinator.config
     start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
 
     query = (
@@ -268,31 +227,38 @@ async def _query_history(coordinator, days: int) -> dict:
     )
 
     try:
-        # FIX 3: reuse the coordinator's persistent session (no new ClientSession)
-        params = urllib.parse.urlencode({"q": query, "db": cfg["database"]})
-        async with coordinator._http_session.get(
-            f"http://{cfg['host']}:{cfg['port']}/query?{params}",
-        ) as resp:
-            if resp.status != 200:
-                return {"days": [], "users": [], "series": {}}
-            data = await resp.json()
+        async with aiohttp.ClientSession() as session:
+            params = urllib.parse.urlencode({"q": query, "db": cfg["database"]})
+            auth   = aiohttp.BasicAuth(cfg["username"], cfg["password"])
+            async with session.get(
+                f"http://{cfg['host']}:{cfg['port']}/query?{params}",
+                auth=auth,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return {"days": [], "users": [], "series": {}}
+                data = await resp.json()
     except Exception as err:
         _LOGGER.warning("History query failed: %s", err)
         return {"days": [], "users": [], "series": {}}
 
-    results     = data.get("results", [{}])
+    # Parse response
+    # Structure: results[0].series[] each has tags.user + columns + values
+    results = data.get("results", [{}])
     series_list = results[0].get("series", []) if results else []
 
-    all_days:    list[str]                    = []
-    user_series: dict[str, dict[str, dict]]   = {}
+    # Build a set of all day strings
+    all_days: list[str] = []
+    user_series: dict[str, dict[str, dict]] = {}  # user → {day → {time,energy,cost}}
 
     for s in series_list:
         user = s.get("tags", {}).get("user", "unknown")
-        cols = s.get("columns", [])
-        vals = s.get("values",  [])
+        cols = s.get("columns", [])  # ["time","time","energy","cost"]
+        vals = s.get("values", [])
 
+        # find col indices
         try:
-            t_idx  = cols.index("time")
+            t_idx = cols.index("time")
             tm_idx = cols.index("time", t_idx + 1) if cols.count("time") > 1 else 1
             e_idx  = cols.index("energy")
             c_idx  = cols.index("cost")
@@ -301,6 +267,7 @@ async def _query_history(coordinator, days: int) -> dict:
 
         user_series[user] = {}
         for row in vals:
+            # row[0] is the timestamp e.g. "2026-02-01T00:00:00Z"
             day = row[0][:10] if row[0] else ""
             if not day:
                 continue
@@ -313,6 +280,7 @@ async def _query_history(coordinator, days: int) -> dict:
             }
 
     all_days.sort()
+
     return {
         "days":   all_days,
         "users":  list(user_series.keys()),
@@ -322,38 +290,31 @@ async def _query_history(coordinator, days: int) -> dict:
 
 # ── Configuration editor ──────────────────────────────────────────────────────
 
-@websocket_api.websocket_command({"type": f"{DOMAIN}/get_config"})
+@websocket_api.websocket_command({
+    "type": f"{DOMAIN}/get_config",
+})
 @callback
 def ws_get_config(hass, connection, msg):
-    """Return current integration configuration (data + options).
-
-    FIX 2: Returns raw user_mappings from entry.options, NOT coordinator.user_map.
-    coordinator.user_map is normalized (ha_user stripped to plain string).
-    The panel needs the full dict {user_id, ha_user} to pre-fill the HA-bruger dropdown.
-    """
+    """Return current integration configuration (data + options)."""
     coordinator = _get_coordinator(hass)
     if not coordinator:
         connection.send_error(msg["id"], "not_ready", "Integration not ready"); return
     try:
         entry = coordinator.config_entry
-        # FIX 2: read from options (raw, preserves ha_user dicts), not coordinator.user_map
-        raw_mappings  = entry.options.get(CONF_USER_MAPPINGS, coordinator.user_map)
-        raw_tracked   = entry.options.get(CONF_TRACKED_USERS, coordinator.tracked_users)
-
         connection.send_result(msg["id"], {
-            # InfluxDB connection (read-only in panel — changed via config flow)
-            "host":                 entry.data.get("host", ""),
-            "port":                 entry.data.get("port", 8086),
-            "database":             entry.data.get("database", ""),
-            "username":             entry.data.get("username", ""),
-            # Sensor entity IDs
-            "user_entity":          entry.data.get("user_entity",         ""),
-            "watt_entity":          entry.data.get("watt_entity",          ""),
-            "device_power_entity":  entry.data.get("device_power_entity", ""),
-            "price_entity":         entry.data.get("price_entity",        ""),
-            # User config — raw from options so ha_user is preserved
-            "user_mappings":        raw_mappings,
-            "tracked_users":        raw_tracked,
+            # InfluxDB (from data — set at setup, not editable here)
+            "host":           entry.data.get("host", ""),
+            "port":           entry.data.get("port", 8086),
+            "database":       entry.data.get("database", ""),
+            "username":       entry.data.get("username", ""),
+            # Sensor entity IDs (from data)
+            "user_entity":          entry.data.get("user_entity",         "sensor.flemming_gamer_satellite_loggeduser"),
+            "watt_entity":          entry.data.get("watt_entity",          "sensor.gamer_pc_power_monitor_current_consumption"),
+            "device_power_entity":  entry.data.get("device_power_entity", "sensor.gamer_pc_power_monitor_device_power"),
+            "price_entity":         entry.data.get("price_entity",        "sensor.energi_data_service"),
+            # User config (from options)
+            "user_mappings":  coordinator.user_map,
+            "tracked_users":  coordinator.tracked_users,
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
@@ -370,22 +331,14 @@ def ws_get_config(hass, connection, msg):
 })
 @websocket_api.async_response
 async def ws_save_config(hass, connection, msg):
-    """Save user configuration and sensor entity IDs.
-
-    FIX 1: Send WebSocket result BEFORE triggering integration reload.
-    Previously async_update_entry fired _async_options_updated synchronously,
-    which unloaded the integration while the WS response was still pending.
-    Result: connection died, JS callWS() never resolved, panel crashed.
-
-    Fix: send_result first, then schedule reload via hass.async_create_task()
-    so it runs after the current event loop iteration completes.
-    """
+    """Save user configuration and sensor entity IDs. Triggers integration reload."""
     coordinator = _get_coordinator(hass)
     if not coordinator:
         connection.send_error(msg["id"], "not_ready", "Integration not ready"); return
     try:
         entry = coordinator.config_entry
 
+        # Validate inputs
         user_mappings = msg["user_mappings"]
         tracked_users = msg["tracked_users"]
 
@@ -394,33 +347,25 @@ async def ws_save_config(hass, connection, msg):
         if not isinstance(tracked_users, list) or not tracked_users:
             connection.send_error(msg["id"], "invalid_input", "tracked_users must be a non-empty list"); return
 
-        # Build new options — preserve ha_user dicts as-is (coordinator normalizes on load)
+        # Build new options (user config)
+        from .const import CONF_USER_MAPPINGS, CONF_TRACKED_USERS
         new_options = {
             **entry.options,
             CONF_USER_MAPPINGS: user_mappings,
             CONF_TRACKED_USERS: tracked_users,
         }
 
-        # Build new data — only update sensor entity ID fields that were sent
+        # Build new data (sensor entity IDs) — only update fields that were sent
         new_data = dict(entry.data)
         for field in ("user_entity", "watt_entity", "device_power_entity", "price_entity"):
-            val = msg.get(field, "")
-            if val and val.strip():
-                new_data[field] = val.strip()
+            if field in msg and msg[field].strip():
+                new_data[field] = msg[field].strip()
 
-        # Persist the new config entry (does NOT trigger reload by itself)
+        # Save both — this triggers _async_options_updated → reload
         hass.config_entries.async_update_entry(entry, data=new_data, options=new_options)
-        _LOGGER.info("Configuration saved — scheduling integration reload")
 
-        # FIX 1: Send success to the panel BEFORE reload kills the WS connection
+        _LOGGER.info("Configuration saved — integration will reload")
         connection.send_result(msg["id"], {"success": True, "reload": True})
-
-        # Schedule reload asynchronously — runs after this coroutine returns,
-        # so the WS response above is guaranteed to be sent first.
-        async def _do_reload():
-            await hass.config_entries.async_reload(entry.entry_id)
-
-        hass.async_create_task(_do_reload())
 
     except Exception as err:
         _LOGGER.exception("Error saving config: %s", err)

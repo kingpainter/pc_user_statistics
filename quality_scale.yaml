@@ -1,0 +1,158 @@
+# quality_scale.yaml
+# Tracks PC User Statistics compliance with HA Integration Quality Scale.
+# See: https://developers.home-assistant.io/docs/integration_quality_scale_index/
+# Version: 2.5.0 | Last Updated: March 7, 2026
+
+rules:
+
+  # ── No Score (Minimum Requirements) ────────────────────────────────────────
+  config-flow:
+    status: done
+    comment: config_flow.py with InfluxDB connection validation.
+  test-before-setup:
+    status: done
+    comment: ConfigEntryNotReady raised if InfluxDB unreachable at startup.
+  unique-config-entry:
+    status: done
+    comment: already_configured abort in config_flow.
+  config-flow-test-coverage:
+    status: todo
+    comment: Integration tests planned for v3.0.0.
+  docs-high-level-description:
+    status: done
+    comment: README.md covers all features and architecture.
+  docs-installation-instructions:
+    status: done
+    comment: README.md has step-by-step installation section.
+  docs-removal-instructions:
+    status: done
+    comment: README.md covers uninstall procedure.
+  entity-unique-id:
+    status: done
+    comment: All entities have unique IDs via coordinator entry_id + key.
+
+  # ── Bronze ──────────────────────────────────────────────────────────────────
+  action-setup:
+    status: exempt
+    comment: No custom services/actions — WebSocket API used instead.
+  common-modules:
+    status: done
+    comment: helpers.py, const.py, store.py, notification_manager.py.
+  config-flow-dependency-wheel:
+    status: done
+    comment: Only aiohttp (already in HA). No extra pip requirements.
+  dependency-transparency:
+    status: done
+    comment: DEPENDENCIES.md lists all dependencies with versions.
+  docs-actions:
+    status: exempt
+    comment: No custom HA actions/services.
+  entity-event-setup:
+    status: done
+    comment: async_track_state_change_event used (not global event bus).
+  has-entity-name:
+    status: done
+    comment: has_entity_name = True on all entities.
+  icon-translations:
+    status: todo
+    comment: Icons defined in Python — consider moving to strings.json icons section.
+  reconfiguration-flow:
+    status: done
+    comment: async_step_reconfigure added in v2.5.0.
+  repair-issues:
+    status: todo
+    comment: Planned — raise RepairIssue on persistent InfluxDB failures.
+  test-coverage:
+    status: todo
+    comment: ~82% coverage. Target ≥95% for Gold.
+  translations:
+    status: done
+    comment: strings.json (EN) + da.json (DA) including reconfigure step.
+
+  # ── Silver ──────────────────────────────────────────────────────────────────
+  async-dependency:
+    status: done
+    comment: aiohttp is fully async. No blocking calls.
+  config-entry-unloading:
+    status: done
+    comment: async_unload_entry closes aiohttp session and removes panel.
+  diagnostics:
+    status: done
+    comment: diagnostics.py added in v2.5.0.
+  entity-unavailable:
+    status: done
+    comment: available property on all sensors — returns False when coordinator data missing.
+  integration-owner:
+    status: done
+    comment: codeowners = ["@kingpainter"] in manifest.json.
+  log-when-unavailable:
+    status: done
+    comment: Logged at debug level to avoid log spam.
+  parallel-updates:
+    status: exempt
+    comment: Single coordinator drives all sensors — parallel updates not applicable.
+  reauthentication-flow:
+    status: done
+    comment: ConfigEntryAuthFailed raised on HTTP 401 — triggers HA re-auth flow.
+  test-before-configure:
+    status: done
+    comment: InfluxDB connection tested in config_flow before saving.
+
+  # ── Gold ────────────────────────────────────────────────────────────────────
+  devices:
+    status: done
+    comment: Hub device + per-user devices with via_device links.
+  discovery:
+    status: exempt
+    comment: Local integration — discovery not applicable.
+  docs-data-update:
+    status: todo
+    comment: Document coordinator polling interval and update strategy.
+  docs-examples:
+    status: todo
+    comment: Add Lovelace card usage examples to README.
+  docs-known-limitations:
+    status: todo
+    comment: Document InfluxDB v1.x only, single-PC limitation, DKK currency.
+  docs-supported-devices:
+    status: todo
+    comment: Document supported sensor types and requirements.
+  docs-supported-functions:
+    status: done
+    comment: All WebSocket commands and sensors documented in README.
+  docs-troubleshooting:
+    status: todo
+    comment: Add troubleshooting section to README.
+  docs-use-cases:
+    status: done
+    comment: README describes all use cases clearly.
+  entity-category:
+    status: done
+    comment: EntityCategory.DIAGNOSTIC on hub sensors in v2.5.0.
+  entity-device-class:
+    status: done
+    comment: DURATION, ENERGY, MONETARY device classes used.
+  entity-disabled-by-default:
+    status: todo
+    comment: Consider disabling verbose diagnostic sensors by default.
+  entity-translations:
+    status: done
+    comment: All entity names in strings.json / da.json.
+  exception-translations:
+    status: todo
+    comment: Translate user-facing error strings.
+  icon-translations:
+    status: todo
+    comment: Move icons to translation files.
+  linting:
+    status: todo
+    comment: Add Ruff + mypy strict to CI pipeline (v3.0.0).
+  appropriate-polling:
+    status: done
+    comment: 60s polling interval, smart tab-aware panel refresh.
+  injection-attacks:
+    status: done
+    comment: InfluxDB writes use parameterised line protocol — no raw interpolation.
+  strict-typing:
+    status: todo
+    comment: Type hints present but mypy strict not verified in CI.

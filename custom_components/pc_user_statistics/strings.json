@@ -13,8 +13,8 @@
         }
       },
       "reconfigure": {
-        "title": "Reconfigure PC User Statistics",
-        "description": "Update your InfluxDB connection details.",
+        "title": "Reconfigure InfluxDB connection",
+        "description": "Update the InfluxDB connection details for PC User Statistics.",
         "data": {
           "host": "Host",
           "port": "Port",
@@ -31,7 +31,7 @@
     },
     "abort": {
       "already_configured": "This integration is already configured.",
-      "reconfigure_successful": "Re-configuration was successful."
+      "reconfigure_successful": "InfluxDB configuration updated successfully."
     }
   },
   "options": {
@@ -73,18 +73,6 @@
       "monthly_cost": {
         "name": "Monthly cost"
       }
-    }
-  },
-  "system_health": {
-    "info": {
-      "version": "Integration version",
-      "can_reach_influxdb": "Reach InfluxDB",
-      "influxdb_host": "InfluxDB host",
-      "monthly_data_loaded": "Monthly data loaded",
-      "write_buffer": "Write buffer (pending/max)",
-      "tracked_users": "Tracked users",
-      "current_user": "Current user",
-      "last_influxdb_write": "Last InfluxDB write"
     }
   }
 }

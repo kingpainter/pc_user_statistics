@@ -7,50 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.5.0] - 2026-03-03
-
-### 🥇 Gold Quality Scale — Optimeringer og self-repair
+## [2.5.0] - 2026-03-07
 
 ### Added
 
-- **`diagnostics.py`** — Gold quality scale krav
-  - Download debug-info via Indstillinger → Enheder & tjenester → PC User Statistics → ⋮ → Download diagnostics
-  - Eksporterer: version, coordinator state, session-data, monthly totals, buffer status, notifikationsregler
-  - Credentials (password) redactes automatisk af HA
+- **`diagnostics.py`** — Downloadable debug info from HA UI (Gold quality scale requirement):
+  - Exposes integration version, config entry state, coordinator status, tracked users
+  - Password intentionally omitted; HA auto-redacts sensitive fields
+  - Accessible via Settings → Devices & Services → PC User Statistics → ⋮ → Download diagnostics
 
-- **`quality_scale.yaml`** — Sporings-fil for tier-compliance
-  - Dokumenterer status på alle Bronze/Silver/Gold/Platinum regler
-  - Exemptions begrundede (discovery, stale_devices, inject_websession)
+- **`quality_scale.yaml`** — Explicit Gold quality scale compliance tracking:
+  - All Bronze/Silver/Gold rules mapped with `done`, `todo`, or `exempt` status
+  - Replaces manual tracking in `HA_COMPLIANCE.md`
 
-- **`reconfigure` step** i `config_flow.py` — Gold quality scale krav
-  - Tillader opdatering af InfluxDB credentials uden at slette integrationen
-  - Tilgængelig via Indstillinger → Enheder & tjenester → PC User Statistics → ⋮ → Rekonfigurer
+- **`websocket.py` — `monthly_loaded` flag in `get_stats` response**:
+  - Panel can now show a loading indicator until InfluxDB monthly data is ready
+  - Prevents displaying zeroes during initial startup
 
-- **`ConfigEntryAuthFailed`** (`__init__.py`, `config_flow.py`)
-  - Kastes ved HTTP 401 fra InfluxDB — HA viser automatisk re-auth dialog
-  - Gælder både ved setup (`_async_verify_influxdb`) og ved writes (`_write_point_to_influx`)
-
-- **`ConfigEntryNotReady`** (`__init__.py`)
-  - Kastes hvis InfluxDB er nede ved HA-start — HA retrier automatisk
-  - `_async_verify_influxdb()` pinger InfluxDB inden `async_config_entry_first_refresh()`
-
-- **`EntityCategory.DIAGNOSTIC`** på hub-sensorer (`sensor.py`)
-  - `current_user`, `current_session_time`, `current_session_energy`, `current_session_cost` er nu diagnostiske
-  - Månedlige bruger-sensorer har ingen kategori (primær data)
-
-- **`available` property** på alle sensorer (`sensor.py`)
-  - Hub-sensorer: unavailable hvis coordinator ikke har data
-  - User-sensorer: unavailable indtil `monthly_loaded = True`
+- **`strings.json` + `da.json` — `reconfigure` step translations**:
+  - Added `reconfigure` step with all field labels (EN + DA)
+  - Added `reconfigure_successful` abort message (EN + DA)
 
 ### Changed
 
-- **`__init__.py`** — `datetime.utcnow()` → `datetime.now(timezone.utc)` (Python 3.12 deprecation fjernet)
-- **`__init__.py`** — Entity IDs caches i coordinator `__init__` (ikke re-læst ved hvert kald)
-- **`__init__.py`** — `_async_load_monthly_data` retry med exponential backoff (30s → 60s → 120s)
-- **`__init__.py`** — Fejler InfluxDB load 3 gange → sætter `_monthly_loaded = True` med 0-værdier (panel hænger ikke)
-- **`websocket.py`** — `monthly_loaded` tilføjet til `ws_get_stats` response
-- **`websocket.py`** — `import urllib.parse` og `datetime` flyttet til toppen (fjernet inline imports)
-- **`sensor.py`** — `native_value` på månedlige sensorer forenklet (single-line dict chain)
+- **`manifest.json`** — Version bumped to `2.5.0`
+- **`const.py`** — `__version__` already at `2.5.0` (set in previous session)
+- **`sensor.py`** — `EntityCategory.DIAGNOSTIC` on hub sensors (set in previous session)
+- **`sensor.py`** — `available` property on all sensors (set in previous session)
+- **`config_flow.py`** — `reconfigure` step added (set in previous session)
+- **`__init__.py`** — `ConfigEntryAuthFailed` (HTTP 401), `ConfigEntryNotReady` (startup failure), exponential backoff retry for `_async_load_monthly_data` (set in previous session)
 
 ---
 

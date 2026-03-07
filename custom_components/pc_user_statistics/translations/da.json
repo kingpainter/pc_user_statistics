@@ -11,6 +11,17 @@
           "username": "Brugernavn",
           "password": "Adgangskode"
         }
+      },
+      "reconfigure": {
+        "title": "Genkonfigurer InfluxDB-forbindelse",
+        "description": "Opdater InfluxDB-forbindelsesoplysningerne for PC Bruger Statistik.",
+        "data": {
+          "host": "Vært",
+          "port": "Port",
+          "database": "Database",
+          "username": "Brugernavn",
+          "password": "Adgangskode"
+        }
       }
     },
     "error": {
@@ -19,7 +30,8 @@
       "unknown": "Ukendt fejl opstod under opsætning."
     },
     "abort": {
-      "already_configured": "Denne integration er allerede konfigureret."
+      "already_configured": "Denne integration er allerede konfigureret.",
+      "reconfigure_successful": "InfluxDB-konfigurationen blev opdateret."
     }
   },
   "options": {
