@@ -3,8 +3,14 @@
 
 from __future__ import annotations
 
+import sys
+import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# Ensure the repo root is on sys.path so custom_components is importable
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
