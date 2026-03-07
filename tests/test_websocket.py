@@ -39,8 +39,10 @@ class TestGetCoordinator:
         assert result is None
 
     def test_returns_none_when_no_coordinator_with_tracked_users(self):
+        # MagicMock(spec=object) has no extra attributes — hasattr returns False
+        plain_mock = MagicMock(spec=object)
         hass = MagicMock()
-        hass.data = {DOMAIN: {"store": MagicMock()}}  # no tracked_users attr
+        hass.data = {DOMAIN: {"store": plain_mock}}
         result = _get_coordinator(hass)
         assert result is None
 
@@ -212,5 +214,6 @@ class TestWsGetDevices:
         ws_get_devices(hass, connection, {"id": 1})
         connection.send_result.assert_called_once()
         result = connection.send_result.call_args[0][1]
-        assert "devices" in result
+        assert "configured" in result
         assert "available" in result
+        assert result["configured"] == ["mobile_app_phone"]

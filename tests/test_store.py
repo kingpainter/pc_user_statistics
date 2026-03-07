@@ -180,16 +180,20 @@ class TestSentHistory:
     async def test_reset_session_sent_clears_user(self):
         store = make_store(initial_data=None)
         await store.async_load()
-        store.mark_sent_in_memory("rule1", "flemming", 9999.0)
+        # Mark long_session (repeat=False premade rule) as sent for flemming
+        store.mark_sent_in_memory("long_session", "flemming", 9999.0)
+        assert store.get_last_sent("long_session", "flemming") == 9999.0
+        # reset_session_sent only clears rules with repeat=False that exist in _data["rules"]
         store.reset_session_sent("flemming")
-        assert store.get_last_sent("rule1", "flemming") == 0.0
+        assert store.get_last_sent("long_session", "flemming") == 0.0
 
     @pytest.mark.asyncio
     async def test_reset_session_sent_only_affects_target_user(self):
         store = make_store(initial_data=None)
         await store.async_load()
-        store.mark_sent_in_memory("rule1", "flemming", 9999.0)
-        store.mark_sent_in_memory("rule1", "lukas", 8888.0)
+        # long_session is repeat=False, pause_reminder is repeat=True
+        store.mark_sent_in_memory("long_session", "flemming", 9999.0)
+        store.mark_sent_in_memory("long_session", "lukas", 8888.0)
         store.reset_session_sent("flemming")
         # lukas should be unaffected
-        assert store.get_last_sent("rule1", "lukas") == 8888.0
+        assert store.get_last_sent("long_session", "lukas") == 8888.0

@@ -93,9 +93,12 @@ class TestAsyncEvaluate:
         mgr, store, hass = make_manager()
         store.get_devices.return_value = []
         coord = make_coordinator()
+        mgr._send_notification = AsyncMock()
 
         await mgr.async_evaluate(coord)
-        store.get_rules.assert_not_called()
+        # No notification should be sent when devices list is empty
+        mgr._send_notification.assert_not_called()
+        store.async_flush.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_disabled_rule_not_triggered(self):
