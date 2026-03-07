@@ -7,35 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.5.0] - 2026-03-07
+## [2.6.0] - 2026-03-07
 
 ### Added
 
-- **`diagnostics.py`** — Downloadable debug info from HA UI (Gold quality scale requirement):
-  - Exposes integration version, config entry state, coordinator status, tracked users
-  - Password intentionally omitted; HA auto-redacts sensitive fields
-  - Accessible via Settings → Devices & Services → PC User Statistics → ⋮ → Download diagnostics
+- **`__init__.py` — RepairIssue raised after 5 consecutive InfluxDB write failures**:
+  - Visible under Settings → Repairs in HA UI
+  - Issue includes actionable description: reload or reconfigure
+  - Automatically cleared when InfluxDB connection is restored
+  - Failure counter resets on every successful write
 
-- **`quality_scale.yaml`** — Explicit Gold quality scale compliance tracking:
-  - All Bronze/Silver/Gold rules mapped with `done`, `todo`, or `exempt` status
-  - Replaces manual tracking in `HA_COMPLIANCE.md`
+- **`CONTRIBUTING.md`** — Developer guide for contributing to the project (Gold quality scale requirement):
+  - Setup instructions, test commands, linting/mypy, commit format, version bump checklist
 
-- **`websocket.py` — `monthly_loaded` flag in `get_stats` response**:
-  - Panel can now show a loading indicator until InfluxDB monthly data is ready
-  - Prevents displaying zeroes during initial startup
+- **`strings.json` + `da.json` — `issues` section** with `influxdb_unreachable` translation (EN + DA)
 
-- **`strings.json` + `da.json` — `reconfigure` step translations**:
-  - Added `reconfigure` step with all field labels (EN + DA)
-  - Added `reconfigure_successful` abort message (EN + DA)
+- **`README.md` — Data Update Strategy section**:
+  - Documents coordinator polling, state-change events, InfluxDB write cadence, retry/backoff behaviour, RepairIssue threshold
+
+- **`README.md` — Known Limitations section**:
+  - InfluxDB v1.x only, single-PC, DKK currency, no historical import, Companion app required
 
 ### Changed
 
-- **`manifest.json`** — Version bumped to `2.5.0`
-- **`const.py`** — `__version__` already at `2.5.0` (set in previous session)
-- **`sensor.py`** — `EntityCategory.DIAGNOSTIC` on hub sensors (set in previous session)
-- **`sensor.py`** — `available` property on all sensors (set in previous session)
-- **`config_flow.py`** — `reconfigure` step added (set in previous session)
-- **`__init__.py`** — `ConfigEntryAuthFailed` (HTTP 401), `ConfigEntryNotReady` (startup failure), exponential backoff retry for `_async_load_monthly_data` (set in previous session)
+- **`manifest.json`** — Version bumped to `2.6.0`
+- **`const.py`** — `__version__` bumped to `2.6.0`
+- **`quality_scale.yaml`** — `repair-issues` and `CONTRIBUTING.md` marked `done`
+- **`HA_COMPLIANCE.md`** — Updated to reflect v2.6.0 Gold progress
 
 ---
 

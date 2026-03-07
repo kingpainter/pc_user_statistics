@@ -6,7 +6,7 @@ This document tracks the PC User Statistics integration's compliance with Home A
 
 ## 🥈 Current Status: **Silver**
 
-**Version**: 2.5.0  
+**Version**: 2.6.0  
 **Last Reviewed**: March 7, 2026
 
 ---
@@ -64,11 +64,7 @@ This document tracks the PC User Statistics integration's compliance with Home A
 | **CI/CD** | ❌ | GitHub Actions |
 | **Ruff linting** | ⚠️ | Tilføj til CI |
 | **Mypy strict** | ⚠️ | Verificer og ret |
-| **Diagnostics** | ✅ v2.5.0 | diagnostics.py |
-| **Reconfigure flow** | ✅ v2.5.0 | config_flow.py |
-| **EntityCategory.DIAGNOSTIC** | ✅ v2.5.0 | sensor.py |
-| **available property** | ✅ v2.5.0 | sensor.py |
-| **CONTRIBUTING.md** | ❌ | Needs creation |
+| **CONTRIBUTING.md** | ✅ v2.6.0 | CONTRIBUTING.md |
 | **Code review by HA team** | ❌ | Efter Gold prep |
 
 ---
@@ -85,7 +81,7 @@ This document tracks the PC User Statistics integration's compliance with Home A
 
 ---
 
-## 📁 File Structure (v2.5.0)
+## 📁 File Structure (v2.6.0)
 
 ```
 custom_components/pc_user_statistics/
@@ -130,8 +126,8 @@ custom_components/pc_user_statistics/
 
 | Document | Status |
 |----------|--------|
-| **README.md** | ✅ Opdateret til v2.5.0 |
-| **CHANGELOG.md** | ✅ Komplet til v2.5.0 |
+| **README.md** | ✅ Opdateret til v2.6.0 |
+| **CHANGELOG.md** | ✅ Komplet til v2.6.0 |
 | **PLANNED_FEATURES.md** | ✅ Opdateret roadmap |
 | **HA_COMPLIANCE.md** | ✅ Dette dokument |
 | **FIXES_SUMMARY.md** | ✅ v2.0.0 fixes |
@@ -145,7 +141,7 @@ custom_components/pc_user_statistics/
 |------|--------|------|
 | **Bronze** | ✅ Complete | Jan 2026 |
 | **Silver** | ✅ Complete | Jan 2026 |
-| **Gold** | ❌ In progress (v2.5.0 partial ✅) | Target Q4 2026 |
+| **Gold** | ❌ In progress | Target Q4 2026 |
 
 ---
 
@@ -159,5 +155,5 @@ custom_components/pc_user_statistics/
 ---
 
 **Last Updated**: March 1, 2026  
-**Document Version**: 2.5.0  
-**Integration Version**: 2.5.0
+**Document Version**: 2.6.0  
+**Integration Version**: 2.6.0

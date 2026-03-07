@@ -1,8 +1,23 @@
 # File Name: __init__.py
-# Version: 2.5.3
+# Version: 2.6.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 6, 2026
+# Last Updated: March 7, 2026
 #
+# Changes in 2.6.0:
+#   - RepairIssue raised in HA UI after 5 consecutive InfluxDB write failures
+#   - RepairIssue cleared automatically when InfluxDB connection is restored
+#
+# Changes in 2.4.1:
+#   FIX: Removed entry.add_update_listener(_async_options_updated).
+#        The listener triggered an immediate async_reload() whenever options were
+#        updated, which unloaded the integration while ws_save_config() was still
+#        waiting to send its WebSocket response. This caused a silent crash:
+#        the panel froze, data was not saved, and only a full HA restart helped.
+#
+#        Integration reload is now triggered exclusively by ws_save_config() via
+#        hass.async_create_task(_do_reload()), which runs AFTER send_result() has
+#        been delivered to the browser. This guarantees the WS round-trip completes
+#        before the coordinator is torn down.
 
 from datetime import datetime, timedelta, timezone
 import asyncio
@@ -17,6 +32,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed, Con
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers import issue_registry as ir
 
 from .const import (
     DOMAIN,
@@ -114,9 +130,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except (ConfigEntryAuthFailed, ConfigEntryNotReady):
         raise
     except Exception as err:
-        # Don't log at error/warning here — HA logs ConfigEntryNotReady message automatically.
-        # Use debug so we don't spam the log on transient failures.
-        _LOGGER.debug("Unexpected error setting up PC User Statistics: %s", err, exc_info=True)
+        _LOGGER.exception("Unexpected error setting up PC User Statistics: %s", err)
         raise ConfigEntryNotReady(f"Unexpected setup error: {err}") from err
 
 
@@ -229,6 +243,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         # ── Write buffer for failed InfluxDB writes ────────────────────────
         self.failed_writes: list[dict] = []
+
+        # Consecutive write failure counter — used to raise a RepairIssue
+        # when InfluxDB has been unreachable for an extended period.
+        self._consecutive_write_failures: int = 0
+        # Threshold: raise RepairIssue after this many consecutive failed polls
+        self._REPAIR_THRESHOLD: int = 5
 
         # Guard: prevents background retry tasks from running after unload
         self._unloaded: bool = False
@@ -594,17 +614,49 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     )
                 if response.status != 204:
                     _LOGGER.warning("InfluxDB write failed: HTTP %s", response.status)
+                    self._consecutive_write_failures += 1
+                    self._maybe_raise_repair_issue()
                     return False
                 _LOGGER.debug("InfluxDB write OK: %s", point)
+                # Successful write — clear any existing repair issue
+                self._clear_repair_issue()
+                self._consecutive_write_failures = 0
                 return True
         except ConfigEntryAuthFailed:
             raise
         except aiohttp.ClientError as err:
             _LOGGER.warning("InfluxDB write error: %s", err)
+            self._consecutive_write_failures += 1
+            self._maybe_raise_repair_issue()
             return False
         except Exception as err:
             _LOGGER.exception("Unexpected InfluxDB write error: %s", err)
+            self._consecutive_write_failures += 1
+            self._maybe_raise_repair_issue()
             return False
+
+    def _maybe_raise_repair_issue(self) -> None:
+        """Raise a HA RepairIssue if InfluxDB has been unreachable too long."""
+        if self._consecutive_write_failures >= self._REPAIR_THRESHOLD:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                "influxdb_unreachable",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="influxdb_unreachable",
+            )
+            _LOGGER.warning(
+                "InfluxDB has been unreachable for %d consecutive write attempts — "
+                "raised RepairIssue in HA UI",
+                self._consecutive_write_failures,
+            )
+
+    def _clear_repair_issue(self) -> None:
+        """Clear the InfluxDB RepairIssue if it was previously raised."""
+        if self._consecutive_write_failures >= self._REPAIR_THRESHOLD:
+            ir.async_delete_issue(self.hass, DOMAIN, "influxdb_unreachable")
+            _LOGGER.info("InfluxDB connection restored — RepairIssue cleared")
 
     def _buffer_failed_write(self, write_data: dict) -> None:
         """FIFO buffer for failed writes. Drops oldest when full."""

@@ -1,6 +1,6 @@
 # PC User Statistics
 
-[![Version](https://img.shields.io/badge/version-2.5.0-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
+[![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue.svg)](https://www.home-assistant.io/)
 [![Quality Scale](https://img.shields.io/badge/quality-silver%20→%20gold-gold.svg)](https://developers.home-assistant.io/docs/integration_quality_scale_index/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -168,6 +168,32 @@ FROM "pc_usage"
 WHERE time >= now() - 30d
 GROUP BY "user"
 ```
+
+---
+
+## 🔄 Data Update Strategy
+
+The integration uses a **DataUpdateCoordinator** with a 60-second polling interval.
+
+| Event | What happens |
+|-------|-------------|
+| **State change** (user/power sensor) | `async_track_state_change_event` triggers immediately |
+| **Every 60 seconds** | Coordinator polls, calculates deltas, writes to InfluxDB |
+| **HA startup** | Monthly totals loaded from InfluxDB with exponential backoff (30s / 60s / 120s) |
+| **InfluxDB write failure** | Point buffered (FIFO, max 100) and retried next poll |
+| **5+ consecutive failures** | RepairIssue raised in HA UI — visible under Settings → Repairs |
+
+Deltas (time, energy, cost) are only written to InfluxDB when a user is actively logged in and the power sensor reports a positive value.
+
+---
+
+## ⚠️ Known Limitations
+
+- **InfluxDB v1.x only** — InfluxDB v2.x / v3.x is not supported
+- **Single PC** — one integration instance tracks one PC; multi-PC requires multiple config entries (planned for v3.0.0)
+- **DKK currency** — electricity cost is calculated in Danish Krone (DKK); other currencies require a matching energy price sensor
+- **No historical import** — data tracking starts from the moment the integration is installed; existing InfluxDB data from other sources is not imported
+- **HA Companion app required** for push notifications — standard HA notify services are not supported in the notification UI
 
 ---
 

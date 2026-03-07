@@ -11,17 +11,6 @@
           "username": "Username",
           "password": "Password"
         }
-      },
-      "reconfigure": {
-        "title": "Reconfigure InfluxDB connection",
-        "description": "Update the InfluxDB connection details for PC User Statistics.",
-        "data": {
-          "host": "Host",
-          "port": "Port",
-          "database": "Database",
-          "username": "Username",
-          "password": "Password"
-        }
       }
     },
     "error": {
@@ -30,8 +19,7 @@
       "unknown": "Unknown error occurred during setup."
     },
     "abort": {
-      "already_configured": "This integration is already configured.",
-      "reconfigure_successful": "InfluxDB configuration updated successfully."
+      "already_configured": "This integration is already configured."
     }
   },
   "options": {
@@ -73,6 +61,12 @@
       "monthly_cost": {
         "name": "Monthly cost"
       }
+    }
+  },
+  "issues": {
+    "influxdb_unreachable": {
+      "title": "InfluxDB is unreachable",
+      "description": "PC User Statistics has failed to write data to InfluxDB {consecutive_failures} times in a row. Statistics data may be lost.\n\nCheck that InfluxDB is running and accessible, then reload the integration.\n\n**Settings → Devices & Services → PC User Statistics → ⋮ → Reload**\n\nIf credentials have changed, use **Reconfigure** instead."
     }
   }
 }
