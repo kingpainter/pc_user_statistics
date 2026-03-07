@@ -27,6 +27,7 @@ import urllib.parse
 from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
@@ -238,6 +239,10 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         # ── Write buffer for failed InfluxDB writes ────────────────────────
         self.failed_writes: list[dict] = []
+
+        # Repair issue tracking — raised after consecutive InfluxDB write failures
+        self._consecutive_write_failures: int = 0
+        self._REPAIR_THRESHOLD: int = 5
 
         # Guard: prevents background retry tasks from running after unload
         self._unloaded: bool = False
@@ -602,7 +607,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             f"{timestamp_ns}"
         )
         success = await self._write_point_to_influx(point)
-        if not success:
+        if success:
+            self._clear_repair_issue()
+            self._consecutive_write_failures = 0
+        else:
+            self._consecutive_write_failures += 1
+            self._maybe_raise_repair_issue()
             self._buffer_failed_write({"point": point, "timestamp": timestamp_ns, "attempts": 1})
 
     async def _write_point_to_influx(self, point: str) -> bool:
@@ -631,6 +641,28 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.exception("Unexpected InfluxDB write error: %s", err)
             return False
+
+    def _maybe_raise_repair_issue(self) -> None:
+        """Raise a HA repair issue if consecutive write failures hit threshold."""
+        if self._consecutive_write_failures >= self._REPAIR_THRESHOLD:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                "influxdb_unreachable",
+                is_fixable=False,
+                severity=ir.IssueSeverity.WARNING,
+                translation_key="influxdb_unreachable",
+            )
+            _LOGGER.warning(
+                "InfluxDB unreachable after %d consecutive failures — repair issue raised",
+                self._consecutive_write_failures,
+            )
+
+    def _clear_repair_issue(self) -> None:
+        """Clear the InfluxDB repair issue when writes succeed again."""
+        if self._consecutive_write_failures >= self._REPAIR_THRESHOLD:
+            ir.async_delete_issue(self.hass, DOMAIN, "influxdb_unreachable")
+            _LOGGER.info("InfluxDB write succeeded — repair issue cleared")
 
     def _buffer_failed_write(self, write_data: dict) -> None:
         """FIFO buffer for failed writes. Drops oldest when full."""
