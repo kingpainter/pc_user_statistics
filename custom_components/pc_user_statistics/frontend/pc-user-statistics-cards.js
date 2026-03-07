@@ -1,5 +1,5 @@
 // PC User Statistics – Custom Lovelace Cards
-// Version: 1.1.0
+// Version: 2.5.0
 // Cards:
 //   custom:pc-user-statistics-user-card   – compact single-user card (mobile)
 //   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop)

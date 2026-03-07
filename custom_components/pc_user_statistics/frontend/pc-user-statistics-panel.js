@@ -1,8 +1,8 @@
 // PC User Statistics Panel
-// Version: 2.4.1 — Vanilla JS (no imports)
+// Version: 2.5.0 — Vanilla JS (no imports)
 // Last Updated: March 2, 2026
 //
-// Fixes in 2.4.1:
+// Fixes in 2.5.0:
 //   - FIX: TypeError: Assignment to constant variable in _statisticsHTML()
 //          const s was reassigned — now uses let sd (separate normalized copy)
 //   - FIX: CustomElementRegistry: name "pc-user-statistics-panel" already used

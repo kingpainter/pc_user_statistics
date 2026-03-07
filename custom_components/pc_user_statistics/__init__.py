@@ -3,17 +3,6 @@
 # Description: Main setup and coordinator for the PC User Statistics integration.
 # Last Updated: March 6, 2026
 #
-# Changes in 2.4.1:
-#   FIX: Removed entry.add_update_listener(_async_options_updated).
-#        The listener triggered an immediate async_reload() whenever options were
-#        updated, which unloaded the integration while ws_save_config() was still
-#        waiting to send its WebSocket response. This caused a silent crash:
-#        the panel froze, data was not saved, and only a full HA restart helped.
-#
-#        Integration reload is now triggered exclusively by ws_save_config() via
-#        hass.async_create_task(_do_reload()), which runs AFTER send_result() has
-#        been delivered to the browser. This guarantees the WS round-trip completes
-#        before the coordinator is torn down.
 
 from datetime import datetime, timedelta, timezone
 import asyncio
