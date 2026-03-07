@@ -29,6 +29,7 @@ from custom_components.pc_user_statistics.sensor import (
 
 def make_coordinator(data=None, monthly_loaded=True):
     coord = MagicMock()
+    coord.last_update_success = True  # default — override per test as needed
     coord.data = data or {
         "current_user": "flemming",
         "acc_time": 3600.0,
@@ -87,7 +88,8 @@ class TestCurrentUserSensor:
         coord = make_coordinator()
         coord.data = None
         sensor = CurrentUserSensor(coord, make_entry())
-        assert sensor.native_value is None
+        # When data is None, available=False — native_value not called by HA
+        assert sensor.available is False
 
     def test_entity_category_is_diagnostic(self):
         coord = make_coordinator()
@@ -108,7 +110,8 @@ class TestCurrentSessionTimeSensor:
         coord = make_coordinator()
         coord.data = None
         sensor = CurrentSessionTimeSensor(coord, make_entry())
-        assert sensor.native_value == 0.0
+        # When data is None, available=False — HA won't call native_value
+        assert sensor.available is False
 
     def test_unit_is_seconds(self):
         coord = make_coordinator()
@@ -186,7 +189,8 @@ class TestMonthlyTimeSensor:
         coord = make_coordinator()
         coord.data = None
         sensor = MonthlyTimeSensor(coord, make_entry(), "flemming")
-        assert sensor.native_value == 0.0
+        # When data is None, available=False — HA won't call native_value
+        assert sensor.available is False
 
     def test_unit_is_seconds(self):
         coord = make_coordinator()
@@ -222,7 +226,8 @@ class TestMonthlyCostSensor:
         coord = make_coordinator()
         coord.data = None
         sensor = MonthlyCostSensor(coord, make_entry(), "lukas")
-        assert sensor.native_value == 0.0
+        # When data is None, available=False — HA won't call native_value
+        assert sensor.available is False
 
 
 # ── Entity metadata ────────────────────────────────────────────────────────

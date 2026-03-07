@@ -238,6 +238,7 @@ class TestGetData:
         coord.acc_time = acc_time
         coord.acc_energy = acc_energy
         coord.acc_cost = acc_cost
+        coord.tracked_users = ["flemming"]
         coord.monthly = monthly or {"flemming": {"time": 3600.0, "energy": 1.0, "cost": 3.0}}
         coord._pending = pending or {}
 
@@ -264,9 +265,11 @@ class TestGetData:
         assert data["monthly"]["flemming"]["time"] == 3600.0
 
     def test_monthly_not_loaded_merges_pending(self):
+        # monthly must have all tracked_users as keys (zeroed out at startup)
         monthly = {"flemming": {"time": 0.0, "energy": 0.0, "cost": 0.0}}
         pending = {"flemming": {"time": 60.0, "energy": 0.1, "cost": 0.3}}
         coord = self._make_coord(monthly_loaded=False, monthly=monthly, pending=pending)
         data = coord._get_data()
-        # When not loaded, pending is merged in
+        # pending is merged: 0.0 + 60.0 = 60.0
         assert data["monthly"]["flemming"]["time"] == 60.0
+        assert data["monthly_loaded"] is False

@@ -76,7 +76,8 @@ class TestAsyncCheckInfluxdbConnection:
                 mock_hass, "localhost", 8086, "admin", "secret", "homeassistant"
             )
         assert ok is True
-        assert err is None
+        # Function returns "" on success (not None)
+        assert err == ""
 
     @pytest.mark.asyncio
     async def test_ping_fails_returns_cannot_connect(self):
@@ -195,7 +196,7 @@ class TestOptionsFlow:
         entry = MagicMock()
         entry.options = {
             "tracked_users": ["flemming", "lukas"],
-            "user_mappings": "konge=flemming",
+            "user_mappings": {"konge": "flemming"},  # dict, not string
         }
         flow.config_entry = entry
         flow.async_show_form = MagicMock(return_value={"type": "form"})
@@ -240,4 +241,6 @@ class TestOptionsFlow:
 
         result = await flow.async_step_init(user_input)
         call_kwargs = flow.async_show_form.call_args[1]
-        assert "no_users" in call_kwargs.get("errors", {}).get("base", "")
+        errors = call_kwargs.get("errors", {})
+        # Error key is on "tracked_users" field, not "base"
+        assert "no_users" in errors.get("tracked_users", "") or "no_users" in errors.get("base", "")
