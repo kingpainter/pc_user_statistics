@@ -1,7 +1,12 @@
 // PC User Statistics Panel
-// Version: 2.6.2 — Vanilla JS (no imports)
+// Version: 2.5.0 — Vanilla JS (no imports)
 // Last Updated: March 2, 2026
 //
+// Fixes in 2.5.0:
+//   - FIX: TypeError: Assignment to constant variable in _statisticsHTML()
+//          const s was reassigned — now uses let sd (separate normalized copy)
+//   - FIX: CustomElementRegistry: name "pc-user-statistics-panel" already used
+//          Added customElements.get() guard before define()
 
 class PcUserStatisticsPanel extends HTMLElement {
   constructor() {
@@ -47,6 +52,8 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._watt = raw && !isNaN(raw) ? raw : null;
     // Update live gauge states from HA (no extra WS call)
     this._updateGaugeStates();
+    // Update bars in-place if live tab is showing
+    if (this._tab === "live") this._updateBarsInPlace();
     // Only re-render header+watt area to avoid full flash
     this._updateWattDisplay();
   }
@@ -92,19 +99,22 @@ class PcUserStatisticsPanel extends HTMLElement {
   async _load() {
     if (!this._hass) return;
     try {
-      const [stats, system, notif] = await Promise.all([
+      const [stats, system, notif, config] = await Promise.all([
         this._hass.callWS({ type: "pc_user_statistics/get_stats" }),
         this._hass.callWS({ type: "pc_user_statistics/get_system" }),
         this._hass.callWS({ type: "pc_user_statistics/get_notifications" }),
+        this._hass.callWS({ type: "pc_user_statistics/get_config" }),
       ]);
       this._stats  = stats;
       this._system = system;
       this._notif  = notif;
+      if (config) this._config = config;
       this._errCount = 0;
     } catch (e) {
       this._errCount++;
       console.error("PC Stats load error:", e);
     }
+    this._updateGaugeStates();
     this._render();
   }
 
@@ -363,48 +373,56 @@ class PcUserStatisticsPanel extends HTMLElement {
   }
 
   // ── Live Gauge (circular, valgfri sensor) ─────────────────────
-  _gaugeHTML(value, label, colorIdx) {
-    const RING_COLORS = ["#6366f1", "#f59e0b", "#10b981", "#8b5cf6", "#06b6d4"];
-    const ringColor   = RING_COLORS[colorIdx % RING_COLORS.length];
-    const dangerColor = "#ef4444";
+  _barsHTML() {
+    // Renders configured gauge sensors as vertical bar columns (card-style).
+    // Always visible when configured — values updated in-place via _updateGaugeStates().
+    const cfg = this._config || {};
+    const BAR_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
+    const bars = [1,2,3,4,5].map(n => {
+      const entity = cfg[`gauge${n}_entity`];
+      if (!entity) return "";
+      const label = cfg[`gauge${n}_label`] || `G${n}`;
+      const raw   = this._gaugeStates?.[`gauge${n}`];
+      const val   = raw !== null && raw !== undefined && raw !== "unavailable" && raw !== "unknown"
+        ? parseFloat(raw) : null;
+      const pct   = val !== null && !isNaN(val) ? Math.min(Math.max(val, 0), 100) : 0;
+      const color = BAR_COLORS[(n-1) % BAR_COLORS.length];
+      const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
+      const dv    = val !== null && !isNaN(val)
+        ? (Number.isInteger(val) ? val+"%" : val.toFixed(1))
+        : "—";
+      return `<div class="bar-col">
+        <div class="bar-val bar-val-${n}" style="color:${danger}">${dv}</div>
+        <div class="bar-track">
+          <div class="bar-fill bar-fill-${n}" style="height:${pct}%;background:${danger}"></div>
+        </div>
+        <div class="bar-label">${this._esc(label)}</div>
+      </div>`;
+    }).join("");
+    return bars;
+  }
 
-    const pct = Math.min(Math.max(parseFloat(value) || 0, 0), 100);
-    const isPercent = pct <= 100 && String(value).indexOf(".") === -1 || pct === 100;
-
-    // SVG arc (half-circle gauge, same style as watt-gauge but full ring)
-    const r = 40, cx = 50, cy = 50;
-    const toRad = d => (d * Math.PI) / 180;
-    const startAngle = 135, sweepMax = 270;
-    const sweep  = (pct / 100) * sweepMax;
-    const endDeg = startAngle + sweep;
-    const ex = cx + r * Math.cos(toRad(endDeg));
-    const ey = cy + r * Math.sin(toRad(endDeg));
-    const large = sweep > 180 ? 1 : 0;
-    const sx = cx + r * Math.cos(toRad(startAngle));
-    const sy = cy + r * Math.sin(toRad(startAngle));
-    const ex2 = cx + r * Math.cos(toRad(startAngle + sweepMax));
-    const ey2 = cy + r * Math.sin(toRad(startAngle + sweepMax));
-
-    const activeColor = pct > 90 ? dangerColor : pct > 70 ? "#f59e0b" : ringColor;
-    const arcPath = pct > 0.5
-      ? `<path d="M${sx.toFixed(1)},${sy.toFixed(1)} A${r},${r} 0 ${large},1 ${ex.toFixed(1)},${ey.toFixed(1)}" fill="none" stroke="${activeColor}" stroke-width="8" stroke-linecap="round"/>`
-      : "";
-
-    const displayVal = value === null || value === undefined || value === "unavailable" || value === "unknown"
-      ? "—"
-      : (isPercent ? Math.round(pct) + "%" : parseFloat(value).toFixed(1));
-
-    return `<div class="live-gauge-wrap">
-      <svg viewBox="0 0 100 100" class="live-gauge-svg">
-        <path d="M${sx.toFixed(1)},${sy.toFixed(1)} A${r},${r} 0 1,1 ${ex2.toFixed(1)},${ey2.toFixed(1)}"
-          fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="8" stroke-linecap="round"/>
-        ${arcPath}
-        <text x="50" y="50" text-anchor="middle" dominant-baseline="middle"
-          class="gauge-center-val" font-size="18" font-weight="700" fill="${activeColor}">${displayVal}</text>
-        <text x="50" y="68" text-anchor="middle" dominant-baseline="middle"
-          class="gauge-center-label" font-size="11" font-weight="500" fill="rgba(255,255,255,0.55)">${this._esc(label || "")}</text>
-      </svg>
-    </div>`;
+  _updateBarsInPlace() {
+    // Update bar values and fills in-place without re-rendering the full panel.
+    const cfg = this._config || {};
+    const BAR_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
+    [1,2,3,4,5].forEach(n => {
+      const entity = cfg[`gauge${n}_entity`];
+      if (!entity) return;
+      const raw  = this._gaugeStates?.[`gauge${n}`];
+      const val  = raw !== null && raw !== undefined && raw !== "unavailable" && raw !== "unknown"
+        ? parseFloat(raw) : null;
+      const pct  = val !== null && !isNaN(val) ? Math.min(Math.max(val, 0), 100) : 0;
+      const color = BAR_COLORS[(n-1) % BAR_COLORS.length];
+      const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
+      const dv   = val !== null && !isNaN(val)
+        ? (Number.isInteger(val) ? val+"%" : val.toFixed(1))
+        : "—";
+      const valEl  = this.shadowRoot?.querySelector(`.bar-val-${n}`);
+      const fillEl = this.shadowRoot?.querySelector(`.bar-fill-${n}`);
+      if (valEl)  { valEl.textContent = dv; valEl.style.color = danger; }
+      if (fillEl) { fillEl.style.height = pct + "%"; fillEl.style.background = danger; }
+    });
   }
 
   // ── SVG Donut ─────────────────────────────────────────────────
@@ -529,15 +547,9 @@ class PcUserStatisticsPanel extends HTMLElement {
 
     const sessionActive = sd.current_user ? "active" : "";
 
-    // Build gauge elements
-    const cfg = this._config || {};
-    const gaugeItems = [1,2,3,4,5].map(n => {
-      const key = `gauge${n}`;
-      return cfg[`${key}_entity`]
-        ? this._gaugeHTML(this._gaugeStates?.[key], cfg[`${key}_label`] || `gauge ${n}`, n - 1)
-        : "";
-    }).join("");
-    const hasGauges = gaugeItems.trim() !== "";
+    // Build bar columns (always shown when configured)
+    const barsHTML = this._barsHTML();
+    const hasBars = barsHTML.trim() !== "";
 
     const userCards = users.map(u => {
       const d = monthly[u]||{};
@@ -578,7 +590,7 @@ class PcUserStatisticsPanel extends HTMLElement {
           </div>
         </div>
 
-        ${hasGauges ? `<div class="live-gauges">${gaugeItems}</div>` : ""}
+        ${hasBars ? `<div class="live-bars">${barsHTML}</div>` : ""}
 
         <div class="live-right">
           <div class="donut-container">${this._donutSVG(users, monthly)}</div>
@@ -1599,19 +1611,26 @@ class PcUserStatisticsPanel extends HTMLElement {
     .live-stat-icon { font-size:18px; width:24px; text-align:center; }
     .live-stat-val  { font-size:16px; font-weight:700; white-space:nowrap; }
     .live-stat-lbl  { font-size:10px; color:var(--subtext); white-space:nowrap; }
-    .live-gauges {
-      display:flex; flex-wrap:wrap; gap:4px;
-      align-items:center; justify-content:center;
-      flex:1; padding:0 8px;
+    .live-bars {
+      display:flex; gap:8px; align-items:flex-end;
+      flex:1; padding:0 8px; height:100px; min-width:0;
     }
+    .bar-col {
+      display:flex; flex-direction:column; align-items:center;
+      gap:3px; flex:1; height:100%;
+    }
+    .bar-val   { font-size:11px; font-weight:700; white-space:nowrap; min-height:14px; line-height:1; }
+    .bar-track {
+      flex:1; width:100%; background:rgba(255,255,255,0.08);
+      border-radius:5px; overflow:hidden;
+      display:flex; flex-direction:column; justify-content:flex-end;
+    }
+    .bar-fill  { width:100%; border-radius:5px; transition:height .5s cubic-bezier(.4,0,.2,1); min-height:3px; }
+    .bar-label { font-size:9px; color:var(--subtext); text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
     .live-right {
       flex-shrink:0; margin-left:auto;
       border-left:1px solid rgba(255,255,255,0.07); padding-left:20px;
     }
-    .live-gauge-wrap { display:flex; flex-direction:column; align-items:center; }
-    .live-gauge-svg  { width:clamp(68px,9vw,120px); height:clamp(68px,9vw,120px); }
-    .gauge-center-val   { font-family:inherit; }
-    .gauge-center-label { font-family:inherit; text-transform:uppercase; letter-spacing:.05em; }
 
     /* ── Monthly / Statistik tab ── */
     .statistik-layout { display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; }

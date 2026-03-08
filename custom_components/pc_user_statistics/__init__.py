@@ -224,7 +224,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.last_time: float = time.time()
         self.last_power: float = 0.0
         self.last_month: int = datetime.now(timezone.utc).month
-        self.last_write_time: float = time.time()
+        self.last_write_time: float = 0.0  # 0 = aldrig skrevet
 
         # ── Cached entity IDs — read once at init, not on every state lookup ──
         self._user_entity: str   = config_entry.data.get("user_entity",          USER_ENTITY)
@@ -300,9 +300,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         ready at HA startup (common when InfluxDB add-on starts after HA).
         """
         now = datetime.now(timezone.utc)
-        month_start = (
-            now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-        )
+        month_start = now.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         query = (
             f'SELECT SUM("time_delta") AS "time", '
