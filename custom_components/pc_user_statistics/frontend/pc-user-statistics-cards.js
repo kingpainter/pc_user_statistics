@@ -1,5 +1,5 @@
 // PC User Statistics – Custom Lovelace Cards
-// Version: 2.5.0
+// Version: 2.6.2
 // Cards:
 //   custom:pc-user-statistics-user-card   – compact single-user card (mobile)
 //   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop)
@@ -418,11 +418,12 @@ class PcUserStatisticsTabletCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._hass    = null;
-    this._stats   = null;
-    this._config  = {};
-    this._interval = null;
-    this._errCount = 0;
+    this._hass       = null;
+    this._stats      = null;
+    this._config     = {};
+    this._gaugeConfig = null; // loaded once from get_config
+    this._interval   = null;
+    this._errCount   = 0;
   }
 
   setConfig(config) {
@@ -433,9 +434,9 @@ class PcUserStatisticsTabletCard extends HTMLElement {
   set hass(h) {
     const first = !this._hass;
     this._hass = h;
-    if (first) this._load();
-    // Update live watt label without full re-render
+    if (first) { this._load(); this._loadGaugeConfig(); }
     this._updateWatt(h);
+    this._updateBars(h);
   }
 
   connectedCallback() {
@@ -467,6 +468,79 @@ class PcUserStatisticsTabletCard extends HTMLElement {
     const st  = h.states?.["sensor.gamer_pc_power_monitor_current_consumption"];
     const raw = st ? parseFloat(st.state) : null;
     el.textContent = raw && !isNaN(raw) ? raw.toFixed(0) + " W" : "—";
+  }
+
+  async _loadGaugeConfig() {
+    if (!this._hass) return;
+    try {
+      this._gaugeConfig = await this._hass.callWS({ type: `${DOMAIN}/get_config` });
+    } catch (e) {
+      this._gaugeConfig = {};
+    }
+    this._render();
+  }
+
+  _updateBars(h) {
+    const gc = this._gaugeConfig;
+    if (!gc || !this.shadowRoot) return;
+    const GAUGE_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
+    const cols = this.shadowRoot.querySelectorAll(".bar-col");
+    let colIdx = 0;
+    [1,2,3,4,5].forEach(n => {
+      const entity = gc[`gauge${n}_entity`];
+      if (!entity) return;
+      const col  = cols[colIdx++];
+      if (!col) return;
+      const st   = h.states?.[entity];
+      const raw  = st ? parseFloat(st.state) : null;
+      const val  = raw != null && !isNaN(raw) ? raw : null;
+      const pct  = val != null ? Math.min(Math.max(val, 0), 100) : 0;
+      const color = GAUGE_COLORS[(n - 1) % GAUGE_COLORS.length];
+      const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
+      const displayVal = val != null ? (Number.isInteger(val) ? val + "%" : val.toFixed(1)) : "—";
+      const valEl  = col.querySelector(".bar-val");
+      const fillEl = col.querySelector(".bar-fill");
+      if (valEl)  { valEl.textContent = displayVal; valEl.style.color = danger; }
+      if (fillEl) { fillEl.style.height = pct + "%"; fillEl.style.background = danger; }
+    });
+  }
+
+  _gaugesHTML() {
+    const gc = this._gaugeConfig;
+    if (!gc || !this._hass) return "";
+
+    const GAUGE_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
+    const bars = [1,2,3,4,5].map(n => {
+      const entity = gc[`gauge${n}_entity`];
+      const label  = gc[`gauge${n}_label`] || `G${n}`;
+      if (!entity) return null;
+
+      const st    = this._hass.states?.[entity];
+      const raw   = st ? parseFloat(st.state) : null;
+      const val   = raw != null && !isNaN(raw) ? raw : null;
+      const pct   = val != null ? Math.min(Math.max(val, 0), 100) : 0;
+      const color = GAUGE_COLORS[(n - 1) % GAUGE_COLORS.length];
+      const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
+      const displayVal = val != null
+        ? (Number.isInteger(val) ? val + "%" : val.toFixed(1))
+        : "—";
+
+      return `
+        <div class="bar-col">
+          <div class="bar-val" style="color:${danger}">${displayVal}</div>
+          <div class="bar-track">
+            <div class="bar-fill" style="height:${pct}%;background:${danger}"></div>
+          </div>
+          <div class="bar-label">${esc(label)}</div>
+        </div>`;
+    }).filter(Boolean);
+
+    if (!bars.length) return "";
+
+    return `
+      <div class="divider"></div>
+      <div class="section-label">Live sensorer</div>
+      <div class="bars-row">${bars.join("")}</div>`;
   }
 
   _donutSVG(users, monthly) {
@@ -674,6 +748,34 @@ class PcUserStatisticsTabletCard extends HTMLElement {
           letter-spacing: 1px; color: var(--sub); margin-bottom: 8px;
         }
         .loading { color: var(--sub); font-size: 13px; padding: 8px 0; }
+
+        /* ── Live sensor bars ── */
+        .bars-row {
+          display: flex; gap: 10px; align-items: flex-end;
+          height: 100px; padding: 0 4px;
+        }
+        .bar-col {
+          display: flex; flex-direction: column; align-items: center;
+          gap: 4px; flex: 1; height: 100%;
+        }
+        .bar-val {
+          font-size: 11px; font-weight: 700; white-space: nowrap;
+          min-height: 16px; line-height: 1;
+        }
+        .bar-track {
+          flex: 1; width: 100%; background: rgba(255,255,255,0.08);
+          border-radius: 6px; overflow: hidden;
+          display: flex; flex-direction: column; justify-content: flex-end;
+        }
+        .bar-fill {
+          width: 100%; border-radius: 6px;
+          transition: height .6s cubic-bezier(.4,0,.2,1);
+          min-height: 3px;
+        }
+        .bar-label {
+          font-size: 10px; color: var(--sub); text-transform: uppercase;
+          letter-spacing: .5px; white-space: nowrap;
+        }
       </style>
       <ha-card>
         <div class="card">
@@ -689,6 +791,8 @@ class PcUserStatisticsTabletCard extends HTMLElement {
             <div class="user-cards">${userCardsHTML || '<div class="loading">Ingen brugere</div>'}</div>
             ${donutHTML}
           </div>
+
+          ${this._gaugesHTML()}
         </div>
       </ha-card>`;
 

@@ -1,13 +1,8 @@
 # File Name: sensor.py
-# Version: 2.5.0
+# Version: 2.6.2
 # Description: Sensor entities for the PC User Statistics integration.
 # Last Updated: March 3, 2026
 #
-# Changes in 2.5.0:
-#   - Hub sensors (current_user, session_time, session_energy, session_cost) now use
-#     EntityCategory.DIAGNOSTIC — they are live status sensors, not primary user data.
-#   - Monthly user sensors have no category (they are primary tracked data).
-#   - Added `available` property — sensors report unavailable if coordinator data is None.
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.const import EntityCategory

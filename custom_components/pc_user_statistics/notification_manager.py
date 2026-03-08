@@ -1,20 +1,8 @@
 # File Name: notification_manager.py
-# Version: 2.5.1
+# Version: 2.6.2
 # Description: Evaluates notification rules and sends to HA Companion app.
 # Last Updated: March 4, 2026
 #
-# Fixes in 2.5.1:
-#   FIX 1: idle_pc trigger used coordinator.last_write_time as idle duration proxy.
-#           last_write_time reflects the last successful InfluxDB write — it resets
-#           whenever a write succeeds, even during an active session. This caused the
-#           idle timer to always show nearly 0s, so idle_pc never triggered correctly.
-#           Fix: coordinator now tracks self._idle_since separately, set when user
-#           logs out (current_user → None) and cleared when user logs in.
-#
-#   FIX 2: async_mark_sent wrote to disk on every coordinator poll (every 60s) while
-#           a rule was triggered. HA's Store debounces writes internally, but it's
-#           still unnecessary overhead. Batched: mark_sent in-memory immediately,
-#           flush to disk once after all rules are evaluated.
 
 from __future__ import annotations
 

@@ -1,19 +1,14 @@
 // PC User Statistics Panel
-// Version: 2.5.0 — Vanilla JS (no imports)
+// Version: 2.6.2 — Vanilla JS (no imports)
 // Last Updated: March 2, 2026
 //
-// Fixes in 2.5.0:
-//   - FIX: TypeError: Assignment to constant variable in _statisticsHTML()
-//          const s was reassigned — now uses let sd (separate normalized copy)
-//   - FIX: CustomElementRegistry: name "pc-user-statistics-panel" already used
-//          Added customElements.get() guard before define()
 
 class PcUserStatisticsPanel extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
     this._hass       = null;
-    this._tab        = "statistics";
+    this._tab        = "live";
     this._history    = null;
     this._histMetric = "time"; // time | energy | cost
     this._stats      = null;
@@ -26,12 +21,14 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._interval     = null;
     this._wattInterval = null;
     this._watt         = null;   // live watts from HA state
+    this._gaugeStates  = { gauge1: null, gauge2: null, gauge3: null, gauge4: null, gauge5: null }; // live gauge values
     this._errCount     = 0;
     this._isDark       = false;
     this._config       = null;
     this._configSaving = false;
     this._configDirty  = false;
     this._configState  = null; // null | 'saved' | 'error'
+    this._forceRender  = false;
     this._tabOrder     = this._loadTabOrder();
     this._dragSrc      = null; // index being dragged
     this._haUsers      = [];   // [{id, name}] fra config/auth/list
@@ -48,6 +45,8 @@ class PcUserStatisticsPanel extends HTMLElement {
     const st = h.states?.[wattEntity];
     const raw = st ? parseFloat(st.state) : null;
     this._watt = raw && !isNaN(raw) ? raw : null;
+    // Update live gauge states from HA (no extra WS call)
+    this._updateGaugeStates();
     // Only re-render header+watt area to avoid full flash
     this._updateWattDisplay();
   }
@@ -70,6 +69,21 @@ class PcUserStatisticsPanel extends HTMLElement {
     el.textContent = this._watt != null ? this._watt.toFixed(0)+"W" : "—";
     const ring = this.shadowRoot?.querySelector(".watt-ring");
     if (ring) ring.style.opacity = this._watt > 20 ? "1" : "0.3";
+  }
+
+  _updateGaugeStates() {
+    if (!this._hass || !this._config) return;
+    const cfg = this._config;
+    [1, 2, 3, 4, 5].forEach(n => {
+      const key = `gauge${n}`;
+      const entity = cfg[`${key}_entity`];
+      if (entity) {
+        const s = this._hass.states?.[entity];
+        this._gaugeStates[key] = s ? s.state : null;
+      } else {
+        this._gaugeStates[key] = null;
+      }
+    });
   }
 
   // ── Data loading ──────────────────────────────────────────────
@@ -100,7 +114,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     if (!this._hass) return;
     try {
       const tab = this._tab;
-      if (tab === "statistics" || tab === "users") {
+      if (tab === "live" || tab === "statistik") {
         this._stats = await this._hass.callWS({ type: "pc_user_statistics/get_stats" });
       } else if (tab === "notifications") {
         const [stats, notif] = await Promise.all([
@@ -223,8 +237,8 @@ class PcUserStatisticsPanel extends HTMLElement {
   // ── Tab order persistence ─────────────────────────────────────
   static get ALL_TABS() {
     return [
-      {id:"statistics",    label:"Statistik",      icon:"📊"},
-      {id:"users",         label:"Brugere",         icon:"👤"},
+      {id:"live",          label:"Live",            icon:"🎮"},
+      {id:"statistik",     label:"Statistik",       icon:"📊"},
       {id:"notifications", label:"Notifikationer",  icon:"🔔"},
       {id:"history",       label:"Historik",        icon:"📈"},
       {id:"config",        label:"Konfiguration",   icon:"🔧"},
@@ -267,6 +281,8 @@ class PcUserStatisticsPanel extends HTMLElement {
       console.error("Config load error:", e);
       this._config = {};
     }
+    // Now that config is loaded, update gauge states from current hass.states
+    this._updateGaugeStates();
     this._render();
   }
 
@@ -290,6 +306,16 @@ class PcUserStatisticsPanel extends HTMLElement {
       watt_entity:         getVal(".cfg-watt-entity"),
       device_power_entity: getVal(".cfg-device-power-entity"),
       price_entity:        getVal(".cfg-price-entity"),
+      gauge1_entity:       getVal(".cfg-gauge1-entity"),
+      gauge1_label:        getVal(".cfg-gauge1-label"),
+      gauge2_entity:       getVal(".cfg-gauge2-entity"),
+      gauge2_label:        getVal(".cfg-gauge2-label"),
+      gauge3_entity:       getVal(".cfg-gauge3-entity"),
+      gauge3_label:        getVal(".cfg-gauge3-label"),
+      gauge4_entity:       getVal(".cfg-gauge4-entity"),
+      gauge4_label:        getVal(".cfg-gauge4-label"),
+      gauge5_entity:       getVal(".cfg-gauge5-entity"),
+      gauge5_label:        getVal(".cfg-gauge5-label"),
       user_mappings: {},
       tracked_users: [],
     };
@@ -316,20 +342,69 @@ class PcUserStatisticsPanel extends HTMLElement {
 
     this._configSaving = true;
     this._configState  = null;
+    this._forceRender  = true;
     this._render();
 
     try {
       await this._hass.callWS({ type: "pc_user_statistics/save_config", ...payload });
       this._configState  = "saved";
       this._configSaving = false;
-      this._config = { ...this._config, ...payload };
+      // Reload config from server so ha_user dict values are preserved correctly
+      await this._loadConfig();
+      this._forceRender = true;
       this._render();
     } catch(e) {
       console.error("Save config error:", e);
       this._configState  = "error";
       this._configSaving = false;
+      this._forceRender  = true;
       this._render();
     }
+  }
+
+  // ── Live Gauge (circular, valgfri sensor) ─────────────────────
+  _gaugeHTML(value, label, colorIdx) {
+    const RING_COLORS = ["#6366f1", "#f59e0b", "#10b981", "#8b5cf6", "#06b6d4"];
+    const ringColor   = RING_COLORS[colorIdx % RING_COLORS.length];
+    const dangerColor = "#ef4444";
+
+    const pct = Math.min(Math.max(parseFloat(value) || 0, 0), 100);
+    const isPercent = pct <= 100 && String(value).indexOf(".") === -1 || pct === 100;
+
+    // SVG arc (half-circle gauge, same style as watt-gauge but full ring)
+    const r = 40, cx = 50, cy = 50;
+    const toRad = d => (d * Math.PI) / 180;
+    const startAngle = 135, sweepMax = 270;
+    const sweep  = (pct / 100) * sweepMax;
+    const endDeg = startAngle + sweep;
+    const ex = cx + r * Math.cos(toRad(endDeg));
+    const ey = cy + r * Math.sin(toRad(endDeg));
+    const large = sweep > 180 ? 1 : 0;
+    const sx = cx + r * Math.cos(toRad(startAngle));
+    const sy = cy + r * Math.sin(toRad(startAngle));
+    const ex2 = cx + r * Math.cos(toRad(startAngle + sweepMax));
+    const ey2 = cy + r * Math.sin(toRad(startAngle + sweepMax));
+
+    const activeColor = pct > 90 ? dangerColor : pct > 70 ? "#f59e0b" : ringColor;
+    const arcPath = pct > 0.5
+      ? `<path d="M${sx.toFixed(1)},${sy.toFixed(1)} A${r},${r} 0 ${large},1 ${ex.toFixed(1)},${ey.toFixed(1)}" fill="none" stroke="${activeColor}" stroke-width="8" stroke-linecap="round"/>`
+      : "";
+
+    const displayVal = value === null || value === undefined || value === "unavailable" || value === "unknown"
+      ? "—"
+      : (isPercent ? Math.round(pct) + "%" : parseFloat(value).toFixed(1));
+
+    return `<div class="live-gauge-wrap">
+      <svg viewBox="0 0 100 100" class="live-gauge-svg">
+        <path d="M${sx.toFixed(1)},${sy.toFixed(1)} A${r},${r} 0 1,1 ${ex2.toFixed(1)},${ey2.toFixed(1)}"
+          fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="8" stroke-linecap="round"/>
+        ${arcPath}
+        <text x="50" y="50" text-anchor="middle" dominant-baseline="middle"
+          class="gauge-center-val" font-size="18" font-weight="700" fill="${activeColor}">${displayVal}</text>
+        <text x="50" y="68" text-anchor="middle" dominant-baseline="middle"
+          class="gauge-center-label" font-size="11" font-weight="500" fill="rgba(255,255,255,0.55)">${this._esc(label || "")}</text>
+      </svg>
+    </div>`;
   }
 
   // ── SVG Donut ─────────────────────────────────────────────────
@@ -440,7 +515,7 @@ class PcUserStatisticsPanel extends HTMLElement {
   }
 
   // ── FIX: Was reassigning const s → now uses let sd (normalized copy) ──────
-  _statisticsHTML() {
+  _liveHTML() {
     const s = this._stats;
     if (!s) return `<div class="empty-state">Indlæser...</div>`;
     const users = s.tracked_users||[];
@@ -453,12 +528,16 @@ class PcUserStatisticsPanel extends HTMLElement {
     const sd = { ...s, current_user: cu };
 
     const sessionActive = sd.current_user ? "active" : "";
-    const cards3 = `
-      <div class="stat-grid">
-        <div class="stat-card ${sessionActive}"><div class="stat-icon">⏱️</div><div class="stat-value">${this._fmtTime(sd.acc_time)}</div><div class="stat-label">Sessionstid</div></div>
-        <div class="stat-card"><div class="stat-icon">⚡</div><div class="stat-value">${this._fmtEnergy(sd.acc_energy)}</div><div class="stat-label">Sessionsenergi</div></div>
-        <div class="stat-card"><div class="stat-icon">💰</div><div class="stat-value">${this._fmtCost(sd.acc_cost)}</div><div class="stat-label">Sessionspris</div></div>
-      </div>`;
+
+    // Build gauge elements
+    const cfg = this._config || {};
+    const gaugeItems = [1,2,3,4,5].map(n => {
+      const key = `gauge${n}`;
+      return cfg[`${key}_entity`]
+        ? this._gaugeHTML(this._gaugeStates?.[key], cfg[`${key}_label`] || `gauge ${n}`, n - 1)
+        : "";
+    }).join("");
+    const hasGauges = gaugeItems.trim() !== "";
 
     const userCards = users.map(u => {
       const d = monthly[u]||{};
@@ -479,16 +558,71 @@ class PcUserStatisticsPanel extends HTMLElement {
 
     return `
       <div class="section-title">Live Session</div>
-      <div class="session-donut-row">
-        ${cards3}
-        <div class="donut-wrapper">
+      <div class="live-card">
+
+        <div class="live-left">
+          <div class="live-stat ${sessionActive}">
+            <div class="live-stat-icon">⏱️</div>
+            <div class="live-stat-val">${this._fmtTime(sd.acc_time)}</div>
+            <div class="live-stat-lbl">Sessionstid</div>
+          </div>
+          <div class="live-stat">
+            <div class="live-stat-icon">⚡</div>
+            <div class="live-stat-val">${this._fmtEnergy(sd.acc_energy)}</div>
+            <div class="live-stat-lbl">Sessionsenergi</div>
+          </div>
+          <div class="live-stat">
+            <div class="live-stat-icon">💰</div>
+            <div class="live-stat-val">${this._fmtCost(sd.acc_cost)}</div>
+            <div class="live-stat-lbl">Sessionspris</div>
+          </div>
+        </div>
+
+        ${hasGauges ? `<div class="live-gauges">${gaugeItems}</div>` : ""}
+
+        <div class="live-right">
           <div class="donut-container">${this._donutSVG(users, monthly)}</div>
         </div>
-      </div>
-      <div class="section-title">Månedlige totaler</div>
-      <div class="user-monthly-grid">${userCards}</div>
-      <div class="section-title">🏆 Leaderboard</div>
-      ${this._leaderboardHTML(users, monthly)}`;
+
+      </div>`;
+  }
+
+  _statistikHTML() {
+    const s = this._stats;
+    if (!s) return `<div class="empty-state">Indlæser...</div>`;
+    const users   = s.tracked_users||[];
+    const monthly = s.monthly||{};
+
+    const userCards = users.map(u => {
+      const d = monthly[u]||{};
+      const col = this._userColor(u);
+      return `
+        <div class="user-month-card">
+          <div class="user-month-header">
+            <div class="avatar" style="background:${col}">${u[0].toUpperCase()}</div>
+            <div class="user-month-name">${this._esc(u)}</div>
+          </div>
+          <div class="user-month-stats">
+            <div class="user-stat"><span class="user-stat-label">Tid</span><span class="user-stat-value">${this._fmtTime(d.time)}</span></div>
+            <div class="user-stat"><span class="user-stat-label">Energi</span><span class="user-stat-value">${this._fmtEnergy(d.energy)}</span></div>
+            <div class="user-stat"><span class="user-stat-label">Pris</span><span class="user-stat-value">${this._fmtCost(d.cost)}</span></div>
+          </div>
+        </div>`;
+    }).join("");
+
+    return `
+      <div class="statistik-layout">
+        <div class="statistik-left">
+          <div class="section-title">Månedlige totaler</div>
+          <div class="user-monthly-grid">${userCards}</div>
+          <div class="section-title" style="margin-top:20px">🏆 Leaderboard</div>
+          ${this._leaderboardHTML(users, monthly)}
+        </div>
+        <div class="statistik-right">
+          <div class="section-title">Fordeling</div>
+          <div class="donut-container">${this._donutSVG(users, monthly)}</div>
+        </div>
+      </div>`;
   }
 
   _usersHTML() {
@@ -977,6 +1111,32 @@ class PcUserStatisticsPanel extends HTMLElement {
         </div>
       </div>
 
+      <div class="section-title" style="margin-top:24px">📊 Live Gauge-sensorer <span style="font-size:11px;font-weight:400;opacity:.6">(valgfri)</span></div>
+      <div class="cfg-hint">Vises som runde gauges i Live Session-sektionen. Kun synlige hvis konfigureret. Brug f.eks. CPU%, GPU%, temperatur, volt, amps.</div>
+      ${[
+        { n:1, icon:"🔵", placeholder:"sensor.flemming_gamer_satellite_cpuload",      ex:"cpu"  },
+        { n:2, icon:"🟠", placeholder:"sensor.flemming_gamer_satellite_gpuload",      ex:"gpu"  },
+        { n:3, icon:"🟢", placeholder:"sensor.flemming_gamer_satellite_memoryusage",  ex:"ram"  },
+        { n:4, icon:"🟣", placeholder:"sensor.flemming_gamer_satellite_gputemperature", ex:"gpu °C" },
+        { n:5, icon:"🔵", placeholder:"sensor.flemmings_gamer_pc_currentclockspeed", ex:"mhz"  },
+      ].map(({ n, icon, placeholder, ex }) => `
+      <div class="cfg-grid" style="margin-top:${n===1?'0':'8px'}">
+        <div class="cfg-field">
+          <label class="cfg-label">${icon} Gauge ${n} — Sensor</label>
+          <input class="cfg-gauge${n}-entity cfg-input" type="text"
+            value="${this._esc(cfg[`gauge${n}_entity`] || '')}"
+            placeholder="${placeholder}">
+          <span class="cfg-hint-small">Efterlad tom for at skjule gauge ${n}</span>
+        </div>
+        <div class="cfg-field">
+          <label class="cfg-label">${icon} Gauge ${n} — Etiket</label>
+          <input class="cfg-gauge${n}-label cfg-input" type="text"
+            value="${this._esc(cfg[`gauge${n}_label`] || '')}"
+            placeholder="${ex}">
+          <span class="cfg-hint-small">Tekst vist i midten (f.eks. "${ex}")</span>
+        </div>
+      </div>`).join("")}
+
       <div class="section-title-row" style="margin-top:24px">
         <span class="section-title" style="margin:0">👥 Bruger-mappings</span>
         <button class="add-btn add-mapping-btn">+ Tilføj bruger</button>
@@ -1123,9 +1283,20 @@ class PcUserStatisticsPanel extends HTMLElement {
 
   // ── Main render ───────────────────────────────────────────────
   _render() {
+    // Don't rebuild the config tab DOM while the user is typing in an input/select —
+    // it would destroy focus and discard unsaved keystrokes.
+    // Exception: _forceRender is set when the user explicitly triggers a save/action.
+    if (this._tab === "config" && !this._forceRender) {
+      const active = this.shadowRoot?.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "SELECT" || active.tagName === "TEXTAREA")) {
+        return;
+      }
+    }
+    this._forceRender = false;
+
     let content = "";
-    if      (this._tab==="statistics")    content = this._statisticsHTML();
-    else if (this._tab==="users")         content = this._usersHTML();
+    if      (this._tab==="live")          content = this._liveHTML();
+    else if (this._tab==="statistik")     content = this._statistikHTML();
     else if (this._tab==="notifications") content = this._notificationsHTML();
     else if (this._tab==="history")       content = this._historyHTML();
     else if (this._tab==="config")        content = this._configHTML();
@@ -1412,19 +1583,40 @@ class PcUserStatisticsPanel extends HTMLElement {
     .avatar.large { width:48px; height:48px; font-size:20px; }
 
     /* ── Stat grid ── */
-    .stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; flex:1; min-width:0; }
-    .session-donut-row { display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap; }
-    .session-donut-row .stat-grid { flex:1; min-width:0; }
-    .stat-card { background:var(--card2); border-radius:12px;
-      padding:16px; text-align:center; border:2px solid transparent; }
-    .stat-card.active { border-color:var(--accent);
-      background:color-mix(in srgb,var(--accent) 8%,var(--secondary-background-color,#f3f4f6)); }
-    .stat-icon  { font-size:22px; margin-bottom:6px; }
-    .stat-value { font-size:20px; font-weight:700; }
-    .stat-label { font-size:11px; color:var(--subtext); margin-top:2px; }
+    /* ── Live card ── */
+    .live-card {
+      display:flex; align-items:center; gap:0;
+      background:var(--card2); border-radius:16px;
+      padding:16px 20px; flex-wrap:wrap;
+    }
+    .live-left {
+      display:flex; flex-direction:column; gap:14px;
+      min-width:140px; flex-shrink:0;
+      border-right:1px solid rgba(255,255,255,0.07); padding-right:20px; margin-right:4px;
+    }
+    .live-stat { display:flex; align-items:center; gap:10px; }
+    .live-stat.active .live-stat-val { color:var(--accent); }
+    .live-stat-icon { font-size:18px; width:24px; text-align:center; }
+    .live-stat-val  { font-size:16px; font-weight:700; white-space:nowrap; }
+    .live-stat-lbl  { font-size:10px; color:var(--subtext); white-space:nowrap; }
+    .live-gauges {
+      display:flex; flex-wrap:wrap; gap:4px;
+      align-items:center; justify-content:center;
+      flex:1; padding:0 8px;
+    }
+    .live-right {
+      flex-shrink:0; margin-left:auto;
+      border-left:1px solid rgba(255,255,255,0.07); padding-left:20px;
+    }
+    .live-gauge-wrap { display:flex; flex-direction:column; align-items:center; }
+    .live-gauge-svg  { width:clamp(68px,9vw,120px); height:clamp(68px,9vw,120px); }
+    .gauge-center-val   { font-family:inherit; }
+    .gauge-center-label { font-family:inherit; text-transform:uppercase; letter-spacing:.05em; }
 
-    /* ── Monthly ── */
-    .donut-wrapper { flex-shrink:0; align-self:center; }
+    /* ── Monthly / Statistik tab ── */
+    .statistik-layout { display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; }
+    .statistik-left   { flex:1; min-width:0; }
+    .statistik-right  { flex-shrink:0; width:220px; }
     .user-monthly-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:12px; }
     .user-month-card { background:var(--card2); border-radius:12px; padding:16px; }
     .user-month-header { display:flex; align-items:center; gap:10px; margin-bottom:14px; }

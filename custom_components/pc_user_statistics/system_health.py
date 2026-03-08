@@ -1,11 +1,18 @@
 # File Name: system_health.py
-# Version: 2.5.3
+# Version: 2.6.2
 # Description: System health platform for PC User Statistics.
 #              Exposes integration state in Settings → System → Repairs → System Information.
-# Last Updated: March 6, 2026
+# Last Updated: March 8, 2026
+#
+# Changes in 2.6.2:
+#   - FIX: last_write_time check changed from falsy to explicit None/0 guard.
+#     Shows "Afventer data..." neutrally during startup instead of "aldrig" (orange warning).
+#   - FIX: monthly_data_loaded now returns a human-readable string instead of a raw
+#     boolean, so HA doesn't show a confusing ✅/❌ for a transient loading state.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -39,25 +46,39 @@ async def async_system_health_info(hass: HomeAssistant) -> dict[str, Any]:
     cfg = coordinator.config
     influx_url = f"http://{cfg['host']}:{cfg['port']}{_PING_PATH}"
 
-    # Format last write time as human-readable
-    last_write = coordinator.last_write_time
-    if last_write:
-        delta = datetime.now(timezone.utc).timestamp() - last_write
+    # Format last write time — only show time delta if an actual write has occurred.
+    # last_write_time is initialised to 0.0 at startup (not time.time()) so that
+    # "aldrig" is only shown when no write has happened, not from the epoch anchor.
+    last_write = getattr(coordinator, "last_write_time", 0.0)
+    now_ts = time.time()
+
+    if last_write and last_write > 0 and (now_ts - last_write) < 86400:
+        # A real write has occurred within the last 24 h — show relative time
+        delta = now_ts - last_write
         if delta < 60:
             last_write_str = f"{int(delta)}s siden"
         elif delta < 3600:
             last_write_str = f"{int(delta // 60)}m siden"
         else:
             last_write_str = f"{int(delta // 3600)}t {int((delta % 3600) // 60)}m siden"
+    elif not coordinator.current_user:
+        # No active user — PC is idle, no writes expected
+        last_write_str = "ingen aktiv session"
     else:
         last_write_str = "aldrig"
+
+    # Monthly data status — human-readable string instead of raw bool
+    if coordinator._monthly_loaded:
+        monthly_str = "Indlæst ✓"
+    else:
+        monthly_str = "Afventer InfluxDB..."
 
     return {
         "version": __version__,
         # async_check_can_reach_url shows a spinner in the UI until resolved
         "can_reach_influxdb": system_health.async_check_can_reach_url(hass, influx_url),
         "influxdb_host": f"{cfg['host']}:{cfg['port']}",
-        "monthly_data_loaded": coordinator._monthly_loaded,
+        "monthly_data": monthly_str,
         "write_buffer": f"{len(coordinator.failed_writes)}/100",
         "tracked_users": len(coordinator.tracked_users),
         "current_user": coordinator.current_user or "ingen",

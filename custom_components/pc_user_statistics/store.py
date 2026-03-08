@@ -1,12 +1,8 @@
 # File Name: store.py
-# Version: 2.5.1
+# Version: 2.6.2
 # Description: Persistent storage for notification rules using HA store (.storage).
 # Last Updated: March 4, 2026
-#
-# Changes in 2.5.1:
-#   - Added mark_sent_in_memory() — updates last_sent in RAM without disk write
-#   - Added async_flush() — single disk flush after all rules are evaluated
-#     Previously async_mark_sent() wrote to disk on every triggered rule (every 60s)
+
 
 from __future__ import annotations
 

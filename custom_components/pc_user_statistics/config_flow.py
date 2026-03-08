@@ -1,9 +1,9 @@
 # File Name: config_flow.py
-# Version: 2.5.0
+# Version: 2.6.2
 # Description: Configuration flow and options flow for the PC User Statistics integration.
 # Last Updated: March 3, 2026
 #
-# Changes in 2.5.0:
+# Changes in 2.6.2:
 #   - Added reconfigure step (Gold quality scale requirement)
 #     Allows updating InfluxDB credentials without deleting the integration.
 #   - ConfigEntryAuthFailed raised on HTTP 401 during connection check.

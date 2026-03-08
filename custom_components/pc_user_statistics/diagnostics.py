@@ -1,5 +1,5 @@
 # File Name: diagnostics.py
-# Version: 2.5.0
+# Version: 2.6.2
 # Description: Diagnostics support for PC User Statistics integration.
 #              Allows users to download debug info from HA UI (Gold quality scale requirement).
 # Last Updated: March 7, 2026

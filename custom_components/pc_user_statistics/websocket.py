@@ -1,5 +1,5 @@
 # File Name: websocket.py
-# Version: 2.5.0
+# Version: 2.6.2
 # Description: WebSocket API for the PC User Statistics panel.
 # Last Updated: March 7, 2026
 
@@ -59,6 +59,12 @@ def ws_get_stats(hass, connection, msg):
             "tracked_users": coordinator.tracked_users,
             "user_map": coordinator.user_map,
             "monthly_loaded": coordinator._monthly_loaded,
+            "gauge1_value": data.get("gauge1_value"),
+            "gauge1_unit": data.get("gauge1_unit"),
+            "gauge1_label": data.get("gauge1_label"),
+            "gauge2_value": data.get("gauge2_value"),
+            "gauge2_unit": data.get("gauge2_unit"),
+            "gauge2_label": data.get("gauge2_label"),
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
@@ -312,8 +318,19 @@ def ws_get_config(hass, connection, msg):
             "watt_entity":          entry.data.get("watt_entity",          "sensor.gamer_pc_power_monitor_current_consumption"),
             "device_power_entity":  entry.data.get("device_power_entity", "sensor.gamer_pc_power_monitor_device_power"),
             "price_entity":         entry.data.get("price_entity",        "sensor.energi_data_service"),
-            # User config (from options)
-            "user_mappings":  coordinator.user_map,
+            # Optional gauge sensors (live display only, not stored in coordinator)
+            "gauge1_entity":        entry.data.get("gauge1_entity", ""),
+            "gauge1_label":         entry.data.get("gauge1_label", ""),
+            "gauge2_entity":        entry.data.get("gauge2_entity", ""),
+            "gauge2_label":         entry.data.get("gauge2_label", ""),
+            "gauge3_entity":        entry.data.get("gauge3_entity", ""),
+            "gauge3_label":         entry.data.get("gauge3_label", ""),
+            "gauge4_entity":        entry.data.get("gauge4_entity", ""),
+            "gauge4_label":         entry.data.get("gauge4_label", ""),
+            "gauge5_entity":        entry.data.get("gauge5_entity", ""),
+            "gauge5_label":         entry.data.get("gauge5_label", ""),
+            # User config (from options — raw, so ha_user dict values are preserved)
+            "user_mappings":  entry.options.get("user_mappings", coordinator.user_map),
             "tracked_users":  coordinator.tracked_users,
         })
     except Exception as err:
@@ -328,6 +345,16 @@ def ws_get_config(hass, connection, msg):
     vol.Optional("watt_entity"):         str,
     vol.Optional("device_power_entity"): str,
     vol.Optional("price_entity"):        str,
+    vol.Optional("gauge1_entity"):       str,
+    vol.Optional("gauge1_label"):        str,
+    vol.Optional("gauge2_entity"):       str,
+    vol.Optional("gauge2_label"):        str,
+    vol.Optional("gauge3_entity"):       str,
+    vol.Optional("gauge3_label"):        str,
+    vol.Optional("gauge4_entity"):       str,
+    vol.Optional("gauge4_label"):        str,
+    vol.Optional("gauge5_entity"):       str,
+    vol.Optional("gauge5_label"):        str,
 })
 @websocket_api.async_response
 async def ws_save_config(hass, connection, msg):
@@ -359,6 +386,12 @@ async def ws_save_config(hass, connection, msg):
         new_data = dict(entry.data)
         for field in ("user_entity", "watt_entity", "device_power_entity", "price_entity"):
             if field in msg and msg[field].strip():
+                new_data[field] = msg[field].strip()
+        # Gauge sensors — allow empty string to clear
+        for field in ("gauge1_entity", "gauge1_label", "gauge2_entity", "gauge2_label",
+                      "gauge3_entity", "gauge3_label", "gauge4_entity", "gauge4_label",
+                      "gauge5_entity", "gauge5_label"):
+            if field in msg:
                 new_data[field] = msg[field].strip()
 
         # Save both — this triggers _async_options_updated → reload

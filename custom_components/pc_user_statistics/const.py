@@ -1,5 +1,5 @@
 # File Name: const.py
-# Version: 2.5.0
+# Version: 2.6.2
 # Description: Constants for the PC User Statistics integration.
 # Last Updated: March 3, 2026
 

@@ -1,5 +1,5 @@
 # File Name: helpers.py
-# Version: 2.5.0
+# Version: 2.6.2
 # Description: Helper functions for parsing, validation, and formatting in the PC User Statistics integration.
 # Last Updated: January 11, 2026
 

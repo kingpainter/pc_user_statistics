@@ -1,9 +1,9 @@
 # File Name: __init__.py
-# Version: 2.5.2
+# Version: 2.6.2
 # Description: Main setup and coordinator for the PC User Statistics integration.
 # Last Updated: March 4, 2026
 #
-# Changes in 2.4.1:
+# Changes in 2.6.2:
 #   FIX: Removed entry.add_update_listener(_async_options_updated).
 #        The listener triggered an immediate async_reload() whenever options were
 #        updated, which unloaded the integration while ws_save_config() was still
