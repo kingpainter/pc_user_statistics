@@ -7,18 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [2.6.1] - 2026-03-08
+## [2.6.2] - 2026-03-08
 
 ### Fixed
 
-- **`__init__.py` — Session-timer tæller ikke op ved genlogin efter PC-nedlukning** (`_handle_user_change`):
-  - Når en PC slukkes brat (strøm/knap) uden et logout-event, forbliver `current_user` sat i RAM
-  - Ved næste opstart registreres bruger-sensoren med samme værdi — `new_user == current_user`
-  - Betingelsen `if new_user != self.current_user` var `False`, så `acc_time` og `last_time` blev aldrig nulstillet
-  - Session 2 arvede `last_time` fra session 1, hvilket gav enten kæmpe phantom-deltas eller ingen optælling
-  - **Fix**: Detekterer "same-user re-login" når `last_time` er forældet (>10 min gap) og behandler det som et nyt login — `acc_time`, `acc_energy`, `acc_cost` og `last_time` nulstilles korrekt
+- **`__init__.py` — Månedlig data loader aldrig fra InfluxDB** (`_async_load_monthly_data`):
+  - `datetime.isoformat()` returnerede `2026-03-01T00:00:00+00:00` i WHERE-klausulen
+  - InfluxDB 1.x accepterer ikke `+00:00` — kræver `Z`-suffix (RFC3339)
+  - Query returnerede tom serie, `_monthly_loaded` forblev `False` permanent
+  - System Health viste "Afventer InfluxDB..." og panelet viste spinner for altid
+  - **Fix**: Ændret til `.strftime("%Y-%m-%dT%H:%M:%SZ")` — samme mønster som `_query_history()` i `websocket.py` allerede brugte korrekt
+
+- **`__init__.py` — `last_write_time` initialiseret forkert** (`__init__`):
+  - `self.last_write_time = time.time()` ved startup gav en falsk "aldrig"-visning
+  - System Health viste orange "aldrig" selv under normal drift uden aktiv bruger
+  - **Fix**: Initialiseret til `0.0` — nul betyder eksplicit "ingen write endnu"
+
+- **`system_health.py` — System Health viste vildledende statusser**:
+  - `monthly_data_loaded` returnerede rå boolean → HA viste ✅/❌ for en forbigående loading-tilstand
+  - `last_influxdb_write` viste orange "aldrig" selvom PC blot var idle (ingen aktiv session)
+  - **Fix**: `monthly_data_loaded` returnerer nu tekst ("Indlæst ✓" / "Afventer InfluxDB...")
+  - **Fix**: `last_influxdb_write` skelner nu mellem "ingen aktiv session" (neutral) og "aldrig" (kun når bruger er aktiv men ingen write er sket)
+
+### Changed
+
+- **`pc-user-statistics-panel.js` — Tab-struktur omstruktureret**:
+  - `statistik`-tab (tidligere `statistics`) omdøbt til **`live`** 🎮 — viser udelukkende live session: gauges, tid/energi/pris og donut-fordeling
+  - `brugere`-tab (`users`) erstattet af ny **`statistik`**-tab 📊 — viser månedlige totaler per bruger, leaderboard og donut side om side i to-kolonne layout
+  - Tab-rækkefølge i `localStorage` opgraderes automatisk — ukendte IDs filtreres og nye tilføjes
 
 ---
+
+## [2.6.1] - 2026-03-08
 
 ## [2.4.1] - 2026-03-03
 
