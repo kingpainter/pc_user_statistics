@@ -1,5 +1,5 @@
 # File Name: websocket.py
-# Version: 2.6.2
+# Version: 2.5.0
 # Description: WebSocket API for the PC User Statistics panel.
 # Last Updated: March 7, 2026
 
@@ -321,14 +321,19 @@ def ws_get_config(hass, connection, msg):
             # Optional gauge sensors (live display only, not stored in coordinator)
             "gauge1_entity":        entry.data.get("gauge1_entity", ""),
             "gauge1_label":         entry.data.get("gauge1_label", ""),
+            "gauge1_max":           entry.data.get("gauge1_max", ""),
             "gauge2_entity":        entry.data.get("gauge2_entity", ""),
             "gauge2_label":         entry.data.get("gauge2_label", ""),
+            "gauge2_max":           entry.data.get("gauge2_max", ""),
             "gauge3_entity":        entry.data.get("gauge3_entity", ""),
             "gauge3_label":         entry.data.get("gauge3_label", ""),
+            "gauge3_max":           entry.data.get("gauge3_max", ""),
             "gauge4_entity":        entry.data.get("gauge4_entity", ""),
             "gauge4_label":         entry.data.get("gauge4_label", ""),
+            "gauge4_max":           entry.data.get("gauge4_max", ""),
             "gauge5_entity":        entry.data.get("gauge5_entity", ""),
             "gauge5_label":         entry.data.get("gauge5_label", ""),
+            "gauge5_max":           entry.data.get("gauge5_max", ""),
             # User config (from options — raw, so ha_user dict values are preserved)
             "user_mappings":  entry.options.get("user_mappings", coordinator.user_map),
             "tracked_users":  coordinator.tracked_users,
@@ -347,14 +352,19 @@ def ws_get_config(hass, connection, msg):
     vol.Optional("price_entity"):        str,
     vol.Optional("gauge1_entity"):       str,
     vol.Optional("gauge1_label"):        str,
+    vol.Optional("gauge1_max"):          str,
     vol.Optional("gauge2_entity"):       str,
     vol.Optional("gauge2_label"):        str,
+    vol.Optional("gauge2_max"):          str,
     vol.Optional("gauge3_entity"):       str,
     vol.Optional("gauge3_label"):        str,
+    vol.Optional("gauge3_max"):          str,
     vol.Optional("gauge4_entity"):       str,
     vol.Optional("gauge4_label"):        str,
+    vol.Optional("gauge4_max"):          str,
     vol.Optional("gauge5_entity"):       str,
     vol.Optional("gauge5_label"):        str,
+    vol.Optional("gauge5_max"):          str,
 })
 @websocket_api.async_response
 async def ws_save_config(hass, connection, msg):
@@ -388,9 +398,11 @@ async def ws_save_config(hass, connection, msg):
             if field in msg and msg[field].strip():
                 new_data[field] = msg[field].strip()
         # Gauge sensors — allow empty string to clear
-        for field in ("gauge1_entity", "gauge1_label", "gauge2_entity", "gauge2_label",
-                      "gauge3_entity", "gauge3_label", "gauge4_entity", "gauge4_label",
-                      "gauge5_entity", "gauge5_label"):
+        for field in ("gauge1_entity", "gauge1_label", "gauge1_max",
+                      "gauge2_entity", "gauge2_label", "gauge2_max",
+                      "gauge3_entity", "gauge3_label", "gauge3_max",
+                      "gauge4_entity", "gauge4_label", "gauge4_max",
+                      "gauge5_entity", "gauge5_label", "gauge5_max"):
             if field in msg:
                 new_data[field] = msg[field].strip()
 
