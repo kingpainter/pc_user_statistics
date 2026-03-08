@@ -1,5 +1,5 @@
 // PC User Statistics – Custom Lovelace Cards
-// Version: 2.6.2
+// Version: 2.5.0
 // Cards:
 //   custom:pc-user-statistics-user-card   – compact single-user card (mobile)
 //   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop)
@@ -434,15 +434,32 @@ class PcUserStatisticsTabletCard extends HTMLElement {
   set hass(h) {
     const first = !this._hass;
     this._hass = h;
-    if (first) { this._load(); this._loadGaugeConfig(); }
+    if (first) this._loadAll();
     this._updateWatt(h);
     this._updateBars(h);
+  }
+
+  async _loadAll() {
+    if (!this._hass) return;
+    try {
+      const [stats, cfg] = await Promise.all([
+        this._hass.callWS({ type: `${DOMAIN}/get_stats` }),
+        this._hass.callWS({ type: `${DOMAIN}/get_config` }),
+      ]);
+      this._stats = stats;
+      this._gaugeConfig = cfg;
+      this._errCount = 0;
+    } catch (e) {
+      this._errCount++;
+      console.error("PcTabletCard load error:", e);
+    }
+    this._render();
   }
 
   connectedCallback() {
     this._interval = setInterval(() => {
       if (this._errCount > 5) { clearInterval(this._interval); return; }
-      if (document.visibilityState === "visible") this._load();
+      if (document.visibilityState === "visible") this._loadStats();
     }, 30000);
   }
 
@@ -450,7 +467,8 @@ class PcUserStatisticsTabletCard extends HTMLElement {
     clearInterval(this._interval);
   }
 
-  async _load() {
+  // Polling: only refresh stats (gauge config is static, loaded once)
+  async _loadStats() {
     if (!this._hass) return;
     try {
       this._stats = await this._hass.callWS({ type: `${DOMAIN}/get_stats` });
@@ -470,77 +488,25 @@ class PcUserStatisticsTabletCard extends HTMLElement {
     el.textContent = raw && !isNaN(raw) ? raw.toFixed(0) + " W" : "—";
   }
 
-  async _loadGaugeConfig() {
-    if (!this._hass) return;
-    try {
-      this._gaugeConfig = await this._hass.callWS({ type: `${DOMAIN}/get_config` });
-    } catch (e) {
-      this._gaugeConfig = {};
-    }
-    this._render();
-  }
-
   _updateBars(h) {
     const gc = this._gaugeConfig;
     if (!gc || !this.shadowRoot) return;
     const GAUGE_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
-    const cols = this.shadowRoot.querySelectorAll(".bar-col");
-    let colIdx = 0;
     [1,2,3,4,5].forEach(n => {
       const entity = gc[`gauge${n}_entity`];
       if (!entity) return;
-      const col  = cols[colIdx++];
-      if (!col) return;
-      const st   = h.states?.[entity];
-      const raw  = st ? parseFloat(st.state) : null;
-      const val  = raw != null && !isNaN(raw) ? raw : null;
-      const pct  = val != null ? Math.min(Math.max(val, 0), 100) : 0;
-      const color = GAUGE_COLORS[(n - 1) % GAUGE_COLORS.length];
+      const st  = h.states?.[entity];
+      const raw = st ? parseFloat(st.state) : null;
+      const val = raw != null && !isNaN(raw) ? raw : null;
+      const pct = val != null ? Math.min(Math.max(val, 0), 100) : 0;
+      const color  = GAUGE_COLORS[(n-1) % GAUGE_COLORS.length];
       const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
-      const displayVal = val != null ? (Number.isInteger(val) ? val + "%" : val.toFixed(1)) : "—";
-      const valEl  = col.querySelector(".bar-val");
-      const fillEl = col.querySelector(".bar-fill");
-      if (valEl)  { valEl.textContent = displayVal; valEl.style.color = danger; }
+      const dv = val != null ? (Number.isInteger(val) ? val+"%" : val.toFixed(1)) : "—";
+      const valEl  = this.shadowRoot.querySelector(`.bar-val-${n}`);
+      const fillEl = this.shadowRoot.querySelector(`.bar-fill-${n}`);
+      if (valEl)  { valEl.textContent = dv; valEl.style.color = danger; }
       if (fillEl) { fillEl.style.height = pct + "%"; fillEl.style.background = danger; }
     });
-  }
-
-  _gaugesHTML() {
-    const gc = this._gaugeConfig;
-    if (!gc || !this._hass) return "";
-
-    const GAUGE_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
-    const bars = [1,2,3,4,5].map(n => {
-      const entity = gc[`gauge${n}_entity`];
-      const label  = gc[`gauge${n}_label`] || `G${n}`;
-      if (!entity) return null;
-
-      const st    = this._hass.states?.[entity];
-      const raw   = st ? parseFloat(st.state) : null;
-      const val   = raw != null && !isNaN(raw) ? raw : null;
-      const pct   = val != null ? Math.min(Math.max(val, 0), 100) : 0;
-      const color = GAUGE_COLORS[(n - 1) % GAUGE_COLORS.length];
-      const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
-      const displayVal = val != null
-        ? (Number.isInteger(val) ? val + "%" : val.toFixed(1))
-        : "—";
-
-      return `
-        <div class="bar-col">
-          <div class="bar-val" style="color:${danger}">${displayVal}</div>
-          <div class="bar-track">
-            <div class="bar-fill" style="height:${pct}%;background:${danger}"></div>
-          </div>
-          <div class="bar-label">${esc(label)}</div>
-        </div>`;
-    }).filter(Boolean);
-
-    if (!bars.length) return "";
-
-    return `
-      <div class="divider"></div>
-      <div class="section-label">Live sensorer</div>
-      <div class="bars-row">${bars.join("")}</div>`;
   }
 
   _donutSVG(users, monthly) {
@@ -603,25 +569,55 @@ class PcUserStatisticsTabletCard extends HTMLElement {
     const users   = s?.tracked_users ?? [];
     const monthly = s?.monthly ?? {};
 
-    // Live session row
-    const sessionHTML = s ? `
-      <div class="session-row">
-        <div class="session-user">
-          ${s.current_user
-            ? `<div class="avatar" style="background:${userColor(s.current_user, users)}">${s.current_user[0].toUpperCase()}</div>
-               <div class="session-info">
-                 <div class="session-name">${esc(s.current_user)}</div>
-                 <div class="session-meta">● LIVE</div>
-               </div>`
-            : `<div class="session-idle">Ingen aktiv session</div>`}
+    // Right column: donut → live session → gauge bars (stacked vertically)
+    const gc = this._gaugeConfig || {};
+    const GAUGE_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
+
+    const gaugeBars = [1,2,3,4,5].map(n => {
+      const entity = gc[`gauge${n}_entity`];
+      const label  = gc[`gauge${n}_label`] || `G${n}`;
+      if (!entity) return "";
+      const st    = this._hass?.states?.[entity];
+      const raw   = st ? parseFloat(st.state) : null;
+      const val   = raw != null && !isNaN(raw) ? raw : null;
+      const pct   = val != null ? Math.min(Math.max(val, 0), 100) : 0;
+      const color = GAUGE_COLORS[(n-1) % GAUGE_COLORS.length];
+      const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
+      const dv    = val != null ? (Number.isInteger(val) ? val+"%" : val.toFixed(1)) : "—";
+      return `<div class="bar-col">
+        <div class="bar-val bar-val-${n}" style="color:${danger}">${dv}</div>
+        <div class="bar-track">
+          <div class="bar-fill bar-fill-${n}" style="height:${pct}%;background:${danger}"></div>
         </div>
-        <div class="session-stats">
-          <div class="s-stat"><div class="s-val">${fmtTime(s.acc_time)}</div><div class="s-lbl">Tid</div></div>
-          <div class="s-stat"><div class="s-val">${fmtEnergy(s.acc_energy)}</div><div class="s-lbl">Energi</div></div>
-          <div class="s-stat"><div class="s-val">${fmtCost(s.acc_cost)}</div><div class="s-lbl">Pris</div></div>
-          <div class="s-stat"><div class="s-val live-watt">—</div><div class="s-lbl">Watt</div></div>
-        </div>
-      </div>` : `<div class="loading">Henter data…</div>`;
+        <div class="bar-label">${esc(label)}</div>
+      </div>`;
+    }).join("");
+    const hasGauges = gaugeBars.trim().length > 0;
+
+    // Live session block (compact, no background — sits between donut and gauges)
+    const liveBlock = (() => {
+      if (!s) return "";
+      if (s.current_user) {
+        const col = userColor(s.current_user, users);
+        return `<div class="live-block" style="--live-color:${col}">
+          <div class="live-user-row">
+            <div class="lp-avatar" style="background:${col}">${s.current_user[0].toUpperCase()}</div>
+            <div class="lp-info">
+              <div class="lp-name">${esc(s.current_user)}</div>
+              <div class="lp-badge">● LIVE</div>
+            </div>
+          </div>
+          <div class="lp-stats">
+            <div class="lp-stat"><span class="lp-val">${fmtTime(s.acc_time)}</span><span class="lp-lbl">Tid</span></div>
+            <div class="lp-stat"><span class="lp-val">${fmtEnergy(s.acc_energy)}</span><span class="lp-lbl">Energi</span></div>
+            <div class="lp-stat"><span class="lp-val">${fmtCost(s.acc_cost)}</span><span class="lp-lbl">Pris</span></div>
+            <div class="lp-stat"><span class="lp-val live-watt">— W</span><span class="lp-lbl">Watt</span></div>
+          </div>
+        </div>`;
+      } else {
+        return `<div class="live-idle">Ingen aktiv session</div>`;
+      }
+    })();
 
     // Monthly user cards
     const userCardsHTML = users.map(u => {
@@ -643,10 +639,6 @@ class PcUserStatisticsTabletCard extends HTMLElement {
         </div>`;
     }).join("");
 
-    // Donut chart
-    const donutHTML = s && users.length
-      ? `<div class="donut-wrap">${this._donutSVG(users, monthly)}</div>` : "";
-
     this.shadowRoot.innerHTML = `
       <style>
         :host {
@@ -666,73 +658,46 @@ class PcUserStatisticsTabletCard extends HTMLElement {
           text-transform: uppercase; letter-spacing: 1px;
           color: var(--sub); margin-bottom: 12px;
         }
-        .divider { height: 1px; background: var(--div); margin: 12px 0; }
 
-        /* ── Live session ── */
-        .session-row {
-          display: flex; align-items: center;
-          gap: 16px; flex-wrap: wrap;
-          background: var(--bg2); border-radius: 12px;
-          padding: 12px 14px;
+        /* ── Two-column layout ── */
+        .main-row {
+          display: flex; gap: 14px; align-items: flex-start;
         }
-        .session-user { display: flex; align-items: center; gap: 10px; min-width: 120px; }
-        .session-idle { color: var(--sub); font-size: 13px; }
-        .session-info {}
-        .session-name { font-size: 14px; font-weight: 700; text-transform: capitalize; }
-        .session-meta { font-size: 11px; color: #10b981; font-weight: 700; }
-        .session-stats { display: flex; gap: 20px; flex-wrap: wrap; }
-        .s-stat { text-align: center; }
-        .s-val  { font-size: 15px; font-weight: 700; white-space: nowrap; }
-        .s-lbl  { font-size: 10px; color: var(--sub); margin-top: 2px; }
+        .left-col  { display: flex; flex-direction: column; gap: 10px; flex: 1; min-width: 0; }
+        .right-col {
+          display: flex; flex-direction: column; gap: 10px;
+          flex-shrink: 0; width: 150px;
+        }
 
-        /* ── Monthly section ── */
-        .monthly-row {
-          display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap;
-        }
-        .user-cards { display: flex; gap: 10px; flex-wrap: wrap; flex: 1; }
+        /* ── Monthly user cards ── */
         .user-card {
           background: var(--bg2); border-radius: 12px;
-          padding: 12px; min-width: 130px; flex: 1;
-          border: 1px solid transparent;
+          padding: 12px; border: 1px solid transparent;
           transition: border-color .2s;
         }
         .user-card-active { border-width: 1px; border-style: solid; }
         .user-card-header {
-          display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+          display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
         }
-        .user-card-name {
-          font-size: 13px; font-weight: 700; text-transform: capitalize; flex: 1;
-        }
+        .user-card-name { font-size: 13px; font-weight: 700; text-transform: capitalize; flex: 1; }
         .live-dot { font-size: 10px; }
-        .user-stats {}
         .u-row {
           display: flex; justify-content: space-between; align-items: center;
-          padding: 3px 0; border-bottom: 1px solid var(--div);
-          font-size: 12px;
+          padding: 3px 0; border-bottom: 1px solid var(--div); font-size: 12px;
         }
         .u-row:last-child { border-bottom: none; }
         .u-lbl { color: var(--sub); }
         .u-val  { font-weight: 600; }
 
-        /* ── Avatar ── */
-        .avatar {
-          width: 36px; height: 36px; border-radius: 50%;
-          display: flex; align-items: center; justify-content: center;
-          font-size: 16px; font-weight: 700; color: #fff; flex-shrink: 0;
-        }
-        .avatar.sm { width: 28px; height: 28px; font-size: 12px; }
-
-        /* ── Donut ── */
+        /* ── Donut (top of right col) ── */
         .donut-wrap {
-          display: flex; flex-direction: column; align-items: center;
-          gap: 8px; flex-shrink: 0; width: 150px;
+          display: flex; flex-direction: column; align-items: center; gap: 8px;
         }
         .donut-ring { position: relative; }
         .donut-svg  { width: 120px; height: 120px; display: block; }
         .donut-center {
           position: absolute; top: 50%; left: 50%;
-          transform: translate(-50%,-50%);
-          text-align: center; width: 70px;
+          transform: translate(-50%,-50%); text-align: center; width: 70px;
         }
         .donut-top-user { font-size: 12px; font-weight: 700; text-transform: capitalize; white-space: nowrap; }
         .donut-top-pct  { font-size: 18px; font-weight: 800; color: var(--text); line-height: 1.1; }
@@ -743,56 +708,74 @@ class PcUserStatisticsTabletCard extends HTMLElement {
         .legend-name    { flex: 1; text-transform: capitalize; }
         .legend-pct     { color: var(--sub); }
 
+        /* ── Live session block (middle of right col) ── */
+        .live-block {
+          background: var(--bg2); border-radius: 10px;
+          padding: 10px; border: 1px solid var(--live-color, transparent);
+          display: flex; flex-direction: column; gap: 8px;
+        }
+        .live-user-row { display: flex; align-items: center; gap: 8px; }
+        .lp-avatar {
+          width: 26px; height: 26px; border-radius: 50%;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 12px; font-weight: 700; color: #fff; flex-shrink: 0;
+        }
+        .lp-info { min-width: 0; }
+        .lp-name  { font-size: 12px; font-weight: 700; text-transform: capitalize;
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .lp-badge { font-size: 9px; color: #10b981; font-weight: 700; }
+        .lp-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+        .lp-stat  { display: flex; flex-direction: column; gap: 1px; }
+        .lp-val   { font-size: 11px; font-weight: 700; white-space: nowrap; }
+        .lp-lbl   { font-size: 9px; color: var(--sub); text-transform: uppercase; letter-spacing: .3px; }
+        .live-idle { font-size: 11px; color: var(--sub); text-align: center; padding: 4px 0; }
+
+        /* ── Gauge bars (bottom of right col) ── */
+        .gauge-bars {
+          display: flex; gap: 6px; align-items: flex-end; height: 80px;
+        }
+        .bar-col {
+          display: flex; flex-direction: column; align-items: center;
+          gap: 2px; flex: 1; height: 100%;
+        }
+        .bar-val   { font-size: 9px; font-weight: 700; white-space: nowrap; min-height: 12px; line-height: 1; }
+        .bar-track {
+          flex: 1; width: 100%; background: rgba(255,255,255,0.08);
+          border-radius: 4px; overflow: hidden;
+          display: flex; flex-direction: column; justify-content: flex-end;
+        }
+        .bar-fill  { width: 100%; border-radius: 4px; transition: height .5s cubic-bezier(.4,0,.2,1); min-height: 2px; }
+        .bar-label { font-size: 8px; color: var(--sub); text-transform: uppercase; letter-spacing: .3px; white-space: nowrap; }
+
+        /* ── Avatar ── */
+        .avatar    { width: 36px; height: 36px; border-radius: 50%;
+                     display: flex; align-items: center; justify-content: center;
+                     font-size: 16px; font-weight: 700; color: #fff; flex-shrink: 0; }
+        .avatar.sm { width: 28px; height: 28px; font-size: 12px; }
+
         .section-label {
           font-size: 10px; font-weight: 600; text-transform: uppercase;
           letter-spacing: 1px; color: var(--sub); margin-bottom: 8px;
         }
         .loading { color: var(--sub); font-size: 13px; padding: 8px 0; }
-
-        /* ── Live sensor bars ── */
-        .bars-row {
-          display: flex; gap: 10px; align-items: flex-end;
-          height: 100px; padding: 0 4px;
-        }
-        .bar-col {
-          display: flex; flex-direction: column; align-items: center;
-          gap: 4px; flex: 1; height: 100%;
-        }
-        .bar-val {
-          font-size: 11px; font-weight: 700; white-space: nowrap;
-          min-height: 16px; line-height: 1;
-        }
-        .bar-track {
-          flex: 1; width: 100%; background: rgba(255,255,255,0.08);
-          border-radius: 6px; overflow: hidden;
-          display: flex; flex-direction: column; justify-content: flex-end;
-        }
-        .bar-fill {
-          width: 100%; border-radius: 6px;
-          transition: height .6s cubic-bezier(.4,0,.2,1);
-          min-height: 3px;
-        }
-        .bar-label {
-          font-size: 10px; color: var(--sub); text-transform: uppercase;
-          letter-spacing: .5px; white-space: nowrap;
-        }
       </style>
       <ha-card>
         <div class="card">
           <div class="card-title">${esc(title)}</div>
-
-          <div class="section-label">Live session</div>
-          ${sessionHTML}
-
-          <div class="divider"></div>
-
           <div class="section-label">Månedlige totaler</div>
-          <div class="monthly-row">
-            <div class="user-cards">${userCardsHTML || '<div class="loading">Ingen brugere</div>'}</div>
-            ${donutHTML}
-          </div>
+          <div class="main-row">
 
-          ${this._gaugesHTML()}
+            <div class="left-col">
+              ${userCardsHTML || '<div class="loading">Ingen brugere</div>'}
+            </div>
+
+            <div class="right-col">
+              ${s && users.length ? `<div class="donut-wrap">${this._donutSVG(users, monthly)}</div>` : ""}
+              ${liveBlock}
+              ${hasGauges ? `<div class="gauge-bars">${gaugeBars}</div>` : ""}
+            </div>
+
+          </div>
         </div>
       </ha-card>`;
 
