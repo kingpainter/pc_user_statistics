@@ -1,6 +1,6 @@
 # PC User Statistics
 
-[![Version](https://img.shields.io/badge/version-2.6.0-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
+[![Version](https://img.shields.io/badge/version-2.6.1-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue.svg)](https://www.home-assistant.io/)
 [![Quality Scale](https://img.shields.io/badge/quality-silver%20→%20gold-gold.svg)](https://developers.home-assistant.io/docs/integration_quality_scale_index/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -46,8 +46,8 @@ A Home Assistant custom integration for tracking gaming PC usage statistics per 
 - **Required Sensors**:
   - User login sensor (returns current username as state)
   - Power consumption sensor (PC wattage in W)
-  - Device power sensor (power meter self-consumption in W)
   - Energy price sensor (DKK per kWh)
+  - *(Optional)* Device self-consumption sensor (only needed for plugs that expose it separately)
 
 ### Manual Installation
 
@@ -127,6 +127,61 @@ The integration adds a **🎮 PC Statistik** entry to your HA sidebar with 6 tab
 - System-info og version
 - InfluxDB write buffer status
 - Bruger-mappings oversigt
+
+---
+
+## 🔌 Supported Devices
+
+### Smart Power Plug
+
+The integration requires a smart plug with power monitoring. The plug's watt sensor is read every 60 seconds to track energy consumption and cost.
+
+#### ✅ TP-Link Kasa HS110 (tested)
+
+| | |
+|---|---|
+| **Hardware version** | 1.0 |
+| **Firmware version** | 1.2.6 |
+| **HA integration** | TP-Link Smart Home (built-in) |
+| **Local control** | Yes — no cloud account required |
+| **HA polling** | Every 5 seconds |
+
+The HS110 exposes a `current_consumption` sensor (W) that is used directly for watt tracking. It does **not** expose a separate device self-consumption sensor — the "Plug self-power" field in the configuration should be left empty when using HS110.
+
+> ⚠️ **Do not update HS110 firmware.** Firmware version 1.1.0 on certain hardware revisions
+> broke local Home Assistant access. Version 1.2.6 on HW 1.0 is stable.
+
+**Entity IDs created by HS110** (example device name `gamer_pc_power_monitor`):
+
+| Sensor | Entity ID | Unit |
+|--------|-----------|------|
+| Current power | `sensor.gamer_pc_power_monitor_current_consumption` | W |
+| Total energy | `sensor.gamer_pc_power_monitor_total_consumption` | kWh |
+
+#### Other compatible plugs
+
+Any smart plug that exposes a watt (W) sensor in Home Assistant will work. The "Plug self-power" field is optional and only relevant for plugs that report their own power draw separately (e.g. Shelly Plug S/Plus).
+
+---
+
+### User Login Sensor (HASS.Agent)
+
+[HASS.Agent](https://github.com/LAB02-Research/HASS.Agent) runs on the Windows gaming PC and reports the currently logged-in Windows username as a HA sensor state.
+
+| | |
+|---|---|
+| **Platform** | Windows only |
+| **Sensor type** | Logged In Users / Windows User |
+| **State example** | `Konge`, `Lukas`, `Sebas` |
+| **Entity example** | `sensor.flemming_gamer_satellite_loggeduser` |
+
+The sensor state is matched to a user ID via the mappings configured in the **🔧 Konfiguration** tab.
+
+---
+
+### Electricity Price Sensor
+
+Any sensor returning a float value in **DKK per kWh** is supported. For Danish users, [Energi Data Service](https://www.home-assistant.io/integrations/energi_data_service/) (available via HACS) provides real-time spot prices including tariffs.
 
 ---
 

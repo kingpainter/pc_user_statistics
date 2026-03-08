@@ -1,7 +1,7 @@
 # quality_scale.yaml
 # Tracks PC User Statistics compliance with HA Integration Quality Scale.
 # See: https://developers.home-assistant.io/docs/integration_quality_scale_index/
-# Version: 2.6.0 | Last Updated: March 7, 2026
+# Version: 2.6.1 | Last Updated: March 8, 2026
 
 rules:
 
@@ -115,8 +115,8 @@ rules:
     status: done
     comment: Known Limitations section added to README.md (v2.6.0).
   docs-supported-devices:
-    status: todo
-    comment: Document supported sensor types and requirements.
+    status: done
+    comment: Supported devices section added to README.md (v2.6.1) — TP-Link Kasa HS110 HW 1.0 / FW 1.2.6 documented with entity IDs and firmware warning.
   docs-supported-functions:
     status: done
     comment: All WebSocket commands and sensors documented in README.

@@ -32,21 +32,48 @@ Used to measure the PC's power consumption in real time.
 
 ### Requirements
 - Must report **current power consumption in watts** (W) as a HA sensor
-- Must report **device self-consumption** (the plug's own power draw) as a separate sensor
-  — this is subtracted from the total to get the PC's net consumption
+- Updates frequently enough for live watt tracking (recommended: ≤5s polling)
 
 ### Tested with
-- **Shelly Plug S** / **Shelly Plug Plus** — exposes both sensors automatically
-- Any Z-Wave or Zigbee smart plug with power monitoring should work
+
+#### TP-Link Kasa HS110 ✅ (primary tested device)
+- **Hardware version**: 1.0
+- **Firmware version**: 1.2.6
+- **HA integration**: [TP-Link Smart Home](https://www.home-assistant.io/integrations/tplink/) (built-in, no HACS needed)
+- **Local control**: Yes — no cloud account required for HW 1.0
+- **Polling**: Every 5 seconds by HA
+
+> ⚠️ **Do NOT update firmware on HS110!** Firmware 1.1.0 on newer hardware versions
+> broke local HA access. Version 1.2.6 on HW 1.0 is stable and tested.
+
+**Sensors exposed by HS110 in Home Assistant:**
+
+| Sensor | Entity suffix | Unit | Used by integration |
+|--------|--------------|------|---------------------|
+| Current power | `_current_consumption` | W | ✅ Yes — watt tracking |
+| Total consumption | `_total_consumption` | kWh | No |
+| Voltage | `_voltage` | V | No |
+| Current | `_current` | A | No |
+
+**Note**: The HS110 reports the total power drawn through the plug as a single value.
+Unlike some other plugs (e.g. Shelly), it does **not** expose a separate "device self-consumption" sensor.
+The integration sets `DEVICE_POWER_ENTITY` to an empty string when using HS110 — no subtraction is needed,
+as the plug's own draw (~1W) is negligible and clamped out when the PC is off.
+
+#### Other compatible plugs
+Any smart plug that exposes a watt sensor in HA should work. The `DEVICE_POWER_ENTITY`
+field is optional — leave it empty if your plug does not have a separate self-consumption sensor.
+
+- **Shelly Plug S / Shelly Plug Plus** — exposes both consumption and device_power sensors
+- Any Z-Wave or Zigbee smart plug with power monitoring
 
 ### Required sensor entities
-| Sensor | Example entity ID | Unit |
-|--------|-------------------|------|
-| PC power consumption | `sensor.gamer_pc_power_monitor_current_consumption` | W |
-| Plug self-consumption | `sensor.gamer_pc_power_monitor_device_power` | W |
+| Sensor | Example entity ID | Unit | Required |
+|--------|-------------------|------|----------|
+| PC power consumption | `sensor.gamer_pc_power_monitor_current_consumption` | W | ✅ |
+| Plug self-consumption | `sensor.gamer_pc_power_monitor_device_power` | W | ⭕ Optional |
 
-> **Note**: The plug's self-consumption (typically 1–3W) is automatically subtracted
-> from the total reading. When the PC is off, the net value is clamped to 0W.
+> When the PC is off, the net watt value is clamped to 0W automatically.
 
 ---
 
@@ -124,16 +151,16 @@ Required only if you want to receive **push notifications**.
 ## 🗂️ Sensor Entity ID Overview
 
 All sensor entity IDs can be configured in the **🔧 Konfiguration** panel tab after installation.
-Default values (matching the original setup):
+Default values (matching the original setup with TP-Link Kasa HS110):
 
-| Role | Default entity ID |
-|------|-------------------|
-| Logged-in user | `sensor.flemming_gamer_satellite_loggeduser` |
-| PC power (W) | `sensor.gamer_pc_power_monitor_current_consumption` |
-| Plug self-power (W) | `sensor.gamer_pc_power_monitor_device_power` |
-| Electricity price (DKK/kWh) | `sensor.energi_data_service` |
+| Role | Default entity ID | Notes |
+|------|-------------------|-------|
+| Logged-in user | `sensor.flemming_gamer_satellite_loggeduser` | HASS.Agent |
+| PC power (W) | `sensor.gamer_pc_power_monitor_current_consumption` | HS110 |
+| Plug self-power (W) | `sensor.gamer_pc_power_monitor_device_power` | Optional — leave empty for HS110 |
+| Electricity price (DKK/kWh) | `sensor.energi_data_service` | Energi Data Service |
 
 ---
 
-**Last Updated**: March 1, 2026  
-**Document Version**: 2.3.0
+**Last Updated**: March 8, 2026  
+**Document Version**: 2.6.1
