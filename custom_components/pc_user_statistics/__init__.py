@@ -1,7 +1,23 @@
 # File Name: __init__.py
-# Version: 2.6.2
+# Version: 2.7.1
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 4, 2026
+# Last Updated: March 14, 2026
+#
+# Changes in 2.7.1:
+#   FIX 1: Session snapshot now saved to disk even when InfluxDB write fails.
+#           Previously, if InfluxDB was unreachable, no snapshot was written
+#           and acc_time was lost on HA restart. Now uses async_flush_session()
+#           for an immediate disk write in the failure path.
+#
+#   FIX 2: _async_restore_session() now receives the store instance directly
+#           from async_setup_entry instead of fetching it from hass.data via
+#           asyncio.sleep(0). Eliminates timing fragility at startup.
+#   NEW: Session persistence — survives HA restart mid-session.
+#        Session state (current_user, acc_time, acc_energy, acc_cost, last_time)
+#        is saved to disk on every successful InfluxDB write (~every 60s) and
+#        restored at HA startup. Max data loss on HA restart: ~60s.
+#        New method: _async_restore_session()
+#        Logout clears the snapshot so stale sessions are never restored.
 #
 # Changes in 2.6.2:
 #   FIX: Removed entry.add_update_listener(_async_options_updated).
@@ -115,6 +131,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         )
 
+        # Restore persisted session — called here with store directly to avoid
+        # timing dependency on hass.data population order.
+        await coordinator._async_restore_session(store)
+
+        # Read the current user sensor state at startup.
+        # async_track_state_change_event only fires on *future* changes — if HA restarts
+        # while a user is already logged in, the sensor never fires again and current_user
+        # stays None, silently discarding all playtime until the next login event.
+        initial_user_state = hass.states.get(coordinator._user_entity)
+        if initial_user_state and initial_user_state.state not in (
+            "unavailable", "unknown", "none", "",
+        ):
+            user_key = initial_user_state.state.lower()
+            raw_mapped = coordinator.user_map.get(user_key)
+            if isinstance(raw_mapped, dict):
+                initial_user = raw_mapped.get("user_id") or None
+            elif isinstance(raw_mapped, str) and raw_mapped:
+                initial_user = raw_mapped
+            else:
+                initial_user = None
+            if initial_user:
+                coordinator.current_user = initial_user
+                coordinator.last_time = time.time()
+                coordinator.last_power = coordinator._get_power()
+                _LOGGER.info(
+                    "Startup: '%s' already logged in — resuming session tracking",
+                    initial_user,
+                )
+
         from .websocket import async_register_websocket_commands
         from .panel import async_register_panel
         async_register_websocket_commands(hass)
@@ -224,7 +269,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.last_time: float = time.time()
         self.last_power: float = 0.0
         self.last_month: int = datetime.now(timezone.utc).month
-        self.last_write_time: float = 0.0  # 0 = aldrig skrevet
+        self.last_write_time: float = time.time()
 
         # ── Cached entity IDs — read once at init, not on every state lookup ──
         self._user_entity: str   = config_entry.data.get("user_entity",          USER_ENTITY)
@@ -253,6 +298,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         # Load monthly data in the background — does NOT block coordinator init
         hass.async_create_task(self._async_load_monthly_data())
+        # _async_restore_session is called explicitly from async_setup_entry
+        # with the store instance — avoids timing dependency on hass.data
 
         _LOGGER.debug("PCStatisticsCoordinator initialized (entry: %s)", config_entry.entry_id)
 
@@ -300,9 +347,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         ready at HA startup (common when InfluxDB add-on starts after HA).
         """
         now = datetime.now(timezone.utc)
-        month_start = now.replace(
-            day=1, hour=0, minute=0, second=0, microsecond=0
-        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        month_start = (
+            now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        )
 
         query = (
             f'SELECT SUM("time_delta") AS "time", '
@@ -381,6 +428,81 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.exception("Unexpected error loading monthly data: %s", err)
             self._monthly_loaded = True
+
+    async def _async_restore_session(self, store: "NotificationStore") -> None:
+        """Restore in-progress session from persistent store after HA restart.
+
+        Called directly from async_setup_entry with the store instance — this
+        avoids any timing dependency on hass.data population order.
+
+        Restores acc_time / acc_energy / acc_cost if HA restarted while a user
+        was active. Safety checks:
+          - Snapshot must be < 4 hours old (avoids restoring after PC was off)
+          - Saved user must still be in tracked_users
+          - Live sensor must not already show a different user
+        """
+        if not store:
+            _LOGGER.debug("Session restore: store not available")
+            return
+
+        snapshot = store.get_session()
+        if not snapshot:
+            _LOGGER.debug("Session restore: no snapshot found")
+            return
+
+        saved_user: str | None = snapshot.get("current_user")
+        saved_at: float = snapshot.get("saved_at", 0.0)
+        now = time.time()
+        age = now - saved_at
+
+        # Reject stale snapshots — PC was likely off
+        if age > 4 * 3600:
+            _LOGGER.info(
+                "Session restore: snapshot %.0f min old — too stale, discarding",
+                age / 60,
+            )
+            await store.async_clear_session()
+            return
+
+        # Only restore if the saved user is still configured
+        if saved_user and saved_user not in self.tracked_users:
+            _LOGGER.warning(
+                "Session restore: user '%s' not in tracked_users — discarding",
+                saved_user,
+            )
+            await store.async_clear_session()
+            return
+
+        # If a different user is already live on the sensor, don't overwrite
+        try:
+            sensor_state = self.hass.states.get(self._user_entity)
+            if sensor_state and sensor_state.state not in ("unavailable", "unknown", "none", ""):
+                live_key = sensor_state.state.lower()
+                live_user = self.user_map.get(live_key)
+                if live_user and live_user != saved_user:
+                    _LOGGER.info(
+                        "Session restore: live user '%s' ≠ snapshot user '%s' — discarding",
+                        live_user, saved_user,
+                    )
+                    await store.async_clear_session()
+                    return
+        except Exception as err:
+            _LOGGER.warning("Session restore: could not read user sensor: %s", err)
+
+        # All checks passed — restore session accumulators
+        self.current_user = saved_user
+        self.acc_time     = snapshot.get("acc_time",   0.0)
+        self.acc_energy   = snapshot.get("acc_energy", 0.0)
+        self.acc_cost     = snapshot.get("acc_cost",   0.0)
+        # Set last_time = now so next poll delta starts from this moment
+        self.last_time       = now
+        self.last_write_time = now
+
+        _LOGGER.info(
+            "Session restored after HA restart — user='%s' acc_time=%.0fs "
+            "acc_energy=%.4fkWh acc_cost=%.4fDKK (snapshot age %.0fs)",
+            self.current_user, self.acc_time, self.acc_energy, self.acc_cost, age,
+        )
 
     # ── Coordinator update ─────────────────────────────────────────────────
 
@@ -519,6 +641,11 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             else:
                 # User logged out — start idle timer
                 self._idle_since = now
+                # Clear session snapshot so a stale session is never restored
+                # after a clean logout + HA restart
+                _store = self.hass.data.get(DOMAIN, {}).get("store")
+                if _store:
+                    self.hass.async_create_task(_store.async_clear_session())
 
             # reset last_time so deltas start from this moment, not from
             # whenever the previous session's last event was.
@@ -610,10 +737,35 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         if success:
             self._clear_repair_issue()
             self._consecutive_write_failures = 0
+            # Piggyback session snapshot onto every successful InfluxDB write.
+            # No extra disk I/O — flushed together with notification state (~60s).
+            _store = self.hass.data.get(DOMAIN, {}).get("store")
+            if _store:
+                _store.save_session_in_memory(
+                    self.current_user,
+                    self.acc_time,
+                    self.acc_energy,
+                    self.acc_cost,
+                    time.time(),
+                )
         else:
             self._consecutive_write_failures += 1
             self._maybe_raise_repair_issue()
             self._buffer_failed_write({"point": point, "timestamp": timestamp_ns, "attempts": 1})
+            # Session snapshot is saved even when InfluxDB is down — ensures
+            # acc_time is preserved across HA restarts even if writes are failing.
+            # Uses async_flush_session() for an immediate disk write (cannot
+            # piggyback on notification flush when InfluxDB is unreachable).
+            _store = self.hass.data.get(DOMAIN, {}).get("store")
+            if _store:
+                _store.save_session_in_memory(
+                    self.current_user,
+                    self.acc_time,
+                    self.acc_energy,
+                    self.acc_cost,
+                    time.time(),
+                )
+                self.hass.async_create_task(_store.async_flush_session())
 
     async def _write_point_to_influx(self, point: str) -> bool:
         """Write a single line-protocol point. Returns True on success."""

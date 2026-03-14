@@ -1,12 +1,23 @@
 # File Name: store.py
-# Version: 2.6.2
+# Version: 2.7.0
 # Description: Persistent storage for notification rules using HA store (.storage).
-# Last Updated: March 4, 2026
-
+# Last Updated: March 14, 2026
+#
+# Changes in 2.7.0:
+#   - Added session persistence: save_session() / get_session() / clear_session()
+#     Allows __init__.py coordinator to survive HA restarts mid-session without
+#     losing accumulated time/energy/cost. Session is saved on every InfluxDB
+#     write (~60s) and restored at coordinator startup.
+#
+# Changes in 2.5.1:
+#   - Added mark_sent_in_memory() — updates last_sent in RAM without disk write
+#   - Added async_flush() — single disk flush after all rules are evaluated
+#     Previously async_mark_sent() wrote to disk on every triggered rule (every 60s)
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -73,7 +84,7 @@ PREMADE_RULES: list[dict[str, Any]] = [
 
 
 class NotificationStore:
-    """Handles persistent storage of notification rules."""
+    """Handles persistent storage of notification rules and session state."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
@@ -95,8 +106,9 @@ class NotificationStore:
             await self._store.async_save(self._data)
         else:
             self._data = stored
-            # Ensure last_sent key exists for older installs upgrading from v2.3.0
+            # Ensure keys exist for older installs upgrading from previous versions
             self._data.setdefault("last_sent", {})
+            self._data.setdefault("session", {})
             # Add any new premade rules introduced in newer versions
             updated = False
             for rule in PREMADE_RULES:
@@ -125,6 +137,7 @@ class NotificationStore:
             "rules": rules,
             "devices": [],
             "last_sent": {},
+            "session": {},
         }
 
     # ── Rules ───────────────────────────────────────────────────────────────
@@ -239,3 +252,65 @@ class NotificationStore:
         """
         self.mark_sent_in_memory(rule_id, user, timestamp)
         await self._store.async_save(self._data)
+
+    # ── Session persistence ──────────────────────────────────────────────────
+
+    def get_session(self) -> dict[str, Any] | None:
+        """Return the last saved session snapshot, or None if empty.
+
+        The snapshot contains:
+          - current_user: str | None
+          - acc_time: float      (seconds accumulated this session)
+          - acc_energy: float    (kWh accumulated this session)
+          - acc_cost: float      (DKK accumulated this session)
+          - last_time: float     (unix timestamp of last delta calculation)
+          - saved_at: float      (unix timestamp when snapshot was written)
+
+        Returns None if no session has been saved yet (first run / after clear).
+        """
+        session = self._data.get("session", {})
+        if not session:
+            return None
+        return session
+
+    def save_session_in_memory(
+        self,
+        current_user: str | None,
+        acc_time: float,
+        acc_energy: float,
+        acc_cost: float,
+        last_time: float,
+    ) -> None:
+        """Update session snapshot in RAM — no disk write.
+
+        Call async_flush() or async_flush_session() afterwards to persist.
+        Designed to be called at the same time as an InfluxDB write so we
+        never incur an extra disk write just for session state.
+        """
+        self._data["session"] = {
+            "current_user": current_user,
+            "acc_time": acc_time,
+            "acc_energy": acc_energy,
+            "acc_cost": acc_cost,
+            "last_time": last_time,
+            "saved_at": time.time(),
+        }
+
+    async def async_flush_session(self) -> None:
+        """Persist session snapshot to disk immediately.
+
+        Use this when we need to save session state WITHOUT also flushing
+        notification state (e.g. on logout where no InfluxDB write occurs).
+        """
+        await self._store.async_save(self._data)
+        _LOGGER.debug("Session snapshot flushed to disk")
+
+    async def async_clear_session(self) -> None:
+        """Clear the session snapshot from disk.
+
+        Called on clean logout so a stale session is never restored on the
+        next HA startup. Does NOT affect notification rules or devices.
+        """
+        self._data["session"] = {}
+        await self._store.async_save(self._data)
+        _LOGGER.debug("Session snapshot cleared from disk")

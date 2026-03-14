@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [2.7.0] - 2026-03-14
+
+### Added
+
+- **Session persistence — overlever HA-genstart midt i en session** (`store.py`, `__init__.py`):
+  - Session-state (`current_user`, `acc_time`, `acc_energy`, `acc_cost`, `last_time`) gemmes nu til disk ved hvert succesfuldt InfluxDB-write (~hvert 60s)
+  - Ved HA-startup gendannes sessionen automatisk — ingen tid, energi eller pris går tabt
+  - Maksimalt tab ved HA-genstart: ~60s (svarer til ét poll-interval)
+  - Ingen ekstra disk-writes: session piggybacks på den eksisterende notification-flush
+  - Sikkerheds-tjek ved genoprettelse:
+    - Snapshot afvises hvis det er ældre end 4 timer (PC var slukket)
+    - Snapshot afvises hvis den gemte bruger ikke længere er i `tracked_users`
+    - Snapshot afvises hvis en anden bruger allerede er aktiv på sensoren
+  - Session ryddes fra disk ved ren logout — ingen ghost-sessions ved næste opstart
+  - Nye metoder i `store.py`: `get_session()`, `save_session_in_memory()`, `async_flush_session()`, `async_clear_session()`
+  - Ny metode i `__init__.py`: `_async_restore_session()`
+
 
 ## [2.6.2] - 2026-03-08
 
