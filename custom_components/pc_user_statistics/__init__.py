@@ -1,7 +1,14 @@
 # File Name: __init__.py
-# Version: 2.7.1
+# Version: 2.7.2
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 14, 2026
+# Last Updated: March 16, 2026
+#
+# Changes in 2.7.2:
+#   FIX: Session snapshot now saved immediately on user login.
+#        Previously the first snapshot was written ~60s after login
+#        (on the first InfluxDB write). If HA restarted within those
+#        60s, current_user was not recoverable. One extra disk write
+#        at login closes this gap — max data loss is now ~0s at login.
 #
 # Changes in 2.7.1:
 #   FIX 1: Session snapshot now saved to disk even when InfluxDB write fails.
@@ -638,6 +645,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 store = self.hass.data.get(DOMAIN, {}).get("store")
                 if store:
                     store.reset_session_sent(new_user)
+
+                # Persist login immediately — if HA restarts within the first
+                # ~60s of a session (before the first InfluxDB write), the
+                # snapshot would otherwise be empty or stale. One disk write
+                # at login ensures current_user is always recoverable.
+                _store = self.hass.data.get(DOMAIN, {}).get("store")
+                if _store:
+                    _store.save_session_in_memory(new_user, 0.0, 0.0, 0.0, now)
+                    self.hass.async_create_task(_store.async_flush_session())
             else:
                 # User logged out — start idle timer
                 self._idle_since = now
