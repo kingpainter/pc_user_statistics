@@ -1,7 +1,21 @@
 # File Name: __init__.py
-# Version: 2.7.2
+# Version: 2.7.3
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 16, 2026
+# Last Updated: March 29, 2026
+#
+# Changes in 2.7.3:
+#   FIX 1: Session snapshot now flushed to disk on EVERY successful InfluxDB write.
+#           Previously save_session_in_memory() was called but async_flush_session()
+#           was not — the snapshot only reached disk if a notification rule fired
+#           (notification_manager.async_flush() is conditional on any_sent).
+#           In practice: no notifications = session never persisted = data loss on restart.
+#
+#   FIX 2: Removed force_write=True from coordinator poll (_async_update_data).
+#           force_write bypassed the WRITE_THRESHOLD guard. Combined with the
+#           state-change handler also able to trigger writes, this caused double
+#           writes within the same 60s window → double-counting in InfluxDB.
+#           Coordinator poll now uses force_write=False (default). The 60s
+#           WRITE_THRESHOLD in _calculate_deltas is the single source of truth.
 #
 # Changes in 2.7.2:
 #   FIX: Session snapshot now saved immediately on user login.
@@ -543,7 +557,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # Only write to InfluxDB once monthly data has loaded — avoids double-counting
         # deltas that are already included in the InfluxDB monthly sum.
         if self._monthly_loaded:
-            await self._calculate_deltas(now, force_write=True)
+            await self._calculate_deltas(now)
             # Update last_time only when we actually calculated a delta.
             # If monthly data isn't loaded yet, we skip the calculation entirely
             # and must NOT advance last_time — otherwise those seconds are lost forever.
@@ -753,8 +767,10 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         if success:
             self._clear_repair_issue()
             self._consecutive_write_failures = 0
-            # Piggyback session snapshot onto every successful InfluxDB write.
-            # No extra disk I/O — flushed together with notification state (~60s).
+            # Persist session snapshot to disk on every successful InfluxDB write.
+            # MUST use async_flush_session() — NOT save_session_in_memory() alone.
+            # notification_manager.async_flush() is conditional on any_sent, so
+            # if no notification rules fire the snapshot never reaches disk otherwise.
             _store = self.hass.data.get(DOMAIN, {}).get("store")
             if _store:
                 _store.save_session_in_memory(
@@ -764,6 +780,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     self.acc_cost,
                     time.time(),
                 )
+                self.hass.async_create_task(_store.async_flush_session())
         else:
             self._consecutive_write_failures += 1
             self._maybe_raise_repair_issue()
