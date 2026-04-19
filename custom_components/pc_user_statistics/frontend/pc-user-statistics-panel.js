@@ -7,6 +7,10 @@
 //          const s was reassigned — now uses let sd (separate normalized copy)
 //   - FIX: CustomElementRegistry: name "pc-user-statistics-panel" already used
 //          Added customElements.get() guard before define()
+// Gauge display: _gaugeDisplay() helper added (2026-04-05)
+//   - gauge_max → percent mode (val/max*100, display "X%")
+//   - 0-100 range → auto-suffix from label (%, °C)
+//   - Large values (MHz etc.) → raw + unit suffix from label
 
 class PcUserStatisticsPanel extends HTMLElement {
   constructor() {
@@ -42,19 +46,14 @@ class PcUserStatisticsPanel extends HTMLElement {
   set hass(h) {
     const first = !this._hass;
     this._hass = h;
-    // Detect dark mode from HA theme
     this._isDark = h.themes?.darkMode ?? (window.matchMedia?.("(prefers-color-scheme:dark)").matches ?? false);
     if (first) this._load();
-    // Update live watt from HA state (no extra WS call)
     const wattEntity = "sensor.gamer_pc_power_monitor_current_consumption";
     const st = h.states?.[wattEntity];
     const raw = st ? parseFloat(st.state) : null;
     this._watt = raw && !isNaN(raw) ? raw : null;
-    // Update live gauge states from HA (no extra WS call)
     this._updateGaugeStates();
-    // Update bars in-place if live tab is showing
     if (this._tab === "live") this._updateBarsInPlace();
-    // Only re-render header+watt area to avoid full flash
     this._updateWattDisplay();
   }
 
@@ -95,7 +94,6 @@ class PcUserStatisticsPanel extends HTMLElement {
 
   // ── Data loading ──────────────────────────────────────────────
 
-  // Full load — used on first connect and manual refresh button
   async _load() {
     if (!this._hass) return;
     try {
@@ -118,8 +116,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._render();
   }
 
-  // Smart poll — only fetches what the active tab actually needs.
-  // History and config are static; no need to re-fetch on every tick.
   async _loadForTab() {
     if (!this._hass) return;
     try {
@@ -141,7 +137,6 @@ class PcUserStatisticsPanel extends HTMLElement {
         this._stats  = stats;
         this._system = system;
       }
-      // history + config: never auto-refresh
       this._errCount = 0;
     } catch (e) {
       this._errCount++;
@@ -291,7 +286,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       console.error("Config load error:", e);
       this._config = {};
     }
-    // Now that config is loaded, update gauge states from current hass.states
     this._updateGaugeStates();
     this._render();
   }
@@ -318,14 +312,19 @@ class PcUserStatisticsPanel extends HTMLElement {
       price_entity:        getVal(".cfg-price-entity"),
       gauge1_entity:       getVal(".cfg-gauge1-entity"),
       gauge1_label:        getVal(".cfg-gauge1-label"),
+      gauge1_max:          getVal(".cfg-gauge1-max"),
       gauge2_entity:       getVal(".cfg-gauge2-entity"),
       gauge2_label:        getVal(".cfg-gauge2-label"),
+      gauge2_max:          getVal(".cfg-gauge2-max"),
       gauge3_entity:       getVal(".cfg-gauge3-entity"),
       gauge3_label:        getVal(".cfg-gauge3-label"),
+      gauge3_max:          getVal(".cfg-gauge3-max"),
       gauge4_entity:       getVal(".cfg-gauge4-entity"),
       gauge4_label:        getVal(".cfg-gauge4-label"),
+      gauge4_max:          getVal(".cfg-gauge4-max"),
       gauge5_entity:       getVal(".cfg-gauge5-entity"),
       gauge5_label:        getVal(".cfg-gauge5-label"),
+      gauge5_max:          getVal(".cfg-gauge5-max"),
       user_mappings: {},
       tracked_users: [],
     };
@@ -359,7 +358,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       await this._hass.callWS({ type: "pc_user_statistics/save_config", ...payload });
       this._configState  = "saved";
       this._configSaving = false;
-      // Reload config from server so ha_user dict values are preserved correctly
       await this._loadConfig();
       this._forceRender = true;
       this._render();
@@ -372,29 +370,63 @@ class PcUserStatisticsPanel extends HTMLElement {
     }
   }
 
-  // ── Live Gauge (circular, valgfri sensor) ─────────────────────
-  _barsHTML() {
-    // Renders configured gauge sensors as vertical bar columns (card-style).
-    // Always visible when configured — values updated in-place via _updateGaugeStates().
-    const cfg = this._config || {};
+  // ── Gauge compute helper ──────────────────────────────────────
+  // Returns { pct, displayVal, color } for gauge n.
+  // Rules:
+  //   1. gauge_max set → percent mode: pct = val/max*100, display = "X%"
+  //   2. val 0–100 → treat as percent, auto-suffix from label (%, °C)
+  //   3. Large value (e.g. MHz) → pct=0 (bar empty), display = raw + auto-unit
+  _gaugeDisplay(n) {
+    const cfg    = this._config || {};
+    const raw    = this._gaugeStates?.[`gauge${n}`];
+    const val    = (raw !== null && raw !== undefined && raw !== "unavailable" && raw !== "unknown")
+      ? parseFloat(raw) : null;
+    const maxCfg = parseFloat(cfg[`gauge${n}_max`]);
+    const hasMax = !isNaN(maxCfg) && maxCfg > 0;
+    const lbl    = (cfg[`gauge${n}_label`] || "").toLowerCase();
     const BAR_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
+    const baseColor  = BAR_COLORS[(n - 1) % BAR_COLORS.length];
+
+    if (val === null || isNaN(val)) {
+      return { pct: 0, displayVal: "—", color: baseColor };
+    }
+
+    let pct, displayVal;
+
+    if (hasMax) {
+      // Explicit max → percentage mode
+      pct = Math.min(Math.max(val / maxCfg * 100, 0), 100);
+      displayVal = Math.round(pct) + "%";
+    } else if (val >= 0 && val <= 100) {
+      // In 0–100 range → treat as direct percent; auto-detect suffix from label
+      pct = val;
+      let suffix = "%"; // default
+      if (lbl.includes("temp") || lbl.includes("°c") || lbl.includes("celsius")) suffix = "°C";
+      displayVal = (Number.isInteger(val) ? val : val.toFixed(1)) + suffix;
+    } else {
+      // Large raw value (e.g. MHz, RPM) → bar stays empty, show raw + unit
+      pct = 0;
+      let suffix = "";
+      if (lbl.includes("mhz") || lbl.includes("speed") || lbl.includes("clock")) suffix = " MHz";
+      else if (lbl.includes("rpm")) suffix = " RPM";
+      displayVal = val.toFixed(0) + suffix;
+    }
+
+    const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : baseColor;
+    return { pct, displayVal, color: danger };
+  }
+
+  _barsHTML() {
+    const cfg  = this._config || {};
     const bars = [1,2,3,4,5].map(n => {
       const entity = cfg[`gauge${n}_entity`];
       if (!entity) return "";
       const label = cfg[`gauge${n}_label`] || `G${n}`;
-      const raw   = this._gaugeStates?.[`gauge${n}`];
-      const val   = raw !== null && raw !== undefined && raw !== "unavailable" && raw !== "unknown"
-        ? parseFloat(raw) : null;
-      const pct   = val !== null && !isNaN(val) ? Math.min(Math.max(val, 0), 100) : 0;
-      const color = BAR_COLORS[(n-1) % BAR_COLORS.length];
-      const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
-      const dv    = val !== null && !isNaN(val)
-        ? (Number.isInteger(val) ? val+"%" : val.toFixed(1))
-        : "—";
+      const { pct, displayVal, color } = this._gaugeDisplay(n);
       return `<div class="bar-col">
-        <div class="bar-val bar-val-${n}" style="color:${danger}">${dv}</div>
+        <div class="bar-val bar-val-${n}" style="color:${color}">${displayVal}</div>
         <div class="bar-track">
-          <div class="bar-fill bar-fill-${n}" style="height:${pct}%;background:${danger}"></div>
+          <div class="bar-fill bar-fill-${n}" style="height:${pct}%;background:${color}"></div>
         </div>
         <div class="bar-label">${this._esc(label)}</div>
       </div>`;
@@ -403,25 +435,15 @@ class PcUserStatisticsPanel extends HTMLElement {
   }
 
   _updateBarsInPlace() {
-    // Update bar values and fills in-place without re-rendering the full panel.
     const cfg = this._config || {};
-    const BAR_COLORS = ["#6366f1","#f59e0b","#10b981","#8b5cf6","#06b6d4"];
     [1,2,3,4,5].forEach(n => {
       const entity = cfg[`gauge${n}_entity`];
       if (!entity) return;
-      const raw  = this._gaugeStates?.[`gauge${n}`];
-      const val  = raw !== null && raw !== undefined && raw !== "unavailable" && raw !== "unknown"
-        ? parseFloat(raw) : null;
-      const pct  = val !== null && !isNaN(val) ? Math.min(Math.max(val, 0), 100) : 0;
-      const color = BAR_COLORS[(n-1) % BAR_COLORS.length];
-      const danger = pct > 90 ? "#ef4444" : pct > 70 ? "#f59e0b" : color;
-      const dv   = val !== null && !isNaN(val)
-        ? (Number.isInteger(val) ? val+"%" : val.toFixed(1))
-        : "—";
+      const { pct, displayVal, color } = this._gaugeDisplay(n);
       const valEl  = this.shadowRoot?.querySelector(`.bar-val-${n}`);
       const fillEl = this.shadowRoot?.querySelector(`.bar-fill-${n}`);
-      if (valEl)  { valEl.textContent = dv; valEl.style.color = danger; }
-      if (fillEl) { fillEl.style.height = pct + "%"; fillEl.style.background = danger; }
+      if (valEl)  { valEl.textContent = displayVal; valEl.style.color = color; }
+      if (fillEl) { fillEl.style.height = pct + "%"; fillEl.style.background = color; }
     });
   }
 
@@ -532,41 +554,20 @@ class PcUserStatisticsPanel extends HTMLElement {
       + '</div>';
   }
 
-  // ── FIX: Was reassigning const s → now uses let sd (normalized copy) ──────
   _liveHTML() {
     const s = this._stats;
     if (!s) return `<div class="empty-state">Indlæser...</div>`;
     const users = s.tracked_users||[];
     const monthly = s.monthly||{};
 
-    // Normalize current_user — coordinator may return an object in edge cases
     const rawCU = s.current_user;
     const cu = rawCU && typeof rawCU === "object" ? (rawCU.name ?? rawCU.id ?? String(rawCU)) : (rawCU || null);
-    // FIX: use a new let variable instead of reassigning const s
     const sd = { ...s, current_user: cu };
 
     const sessionActive = sd.current_user ? "active" : "";
 
-    // Build bar columns (always shown when configured)
     const barsHTML = this._barsHTML();
     const hasBars = barsHTML.trim() !== "";
-
-    const userCards = users.map(u => {
-      const d = monthly[u]||{};
-      const col = this._userColor(u);
-      return `
-        <div class="user-month-card">
-          <div class="user-month-header">
-            <div class="avatar" style="background:${col}">${u[0].toUpperCase()}</div>
-            <div class="user-month-name">${this._esc(u)}</div>
-          </div>
-          <div class="user-month-stats">
-            <div class="user-stat"><span class="user-stat-label">Tid</span><span class="user-stat-value">${this._fmtTime(d.time)}</span></div>
-            <div class="user-stat"><span class="user-stat-label">Energi</span><span class="user-stat-value">${this._fmtEnergy(d.energy)}</span></div>
-            <div class="user-stat"><span class="user-stat-label">Pris</span><span class="user-stat-value">${this._fmtCost(d.cost)}</span></div>
-          </div>
-        </div>`;
-    }).join("");
 
     return `
       <div class="section-title">Live Session</div>
@@ -1124,15 +1125,15 @@ class PcUserStatisticsPanel extends HTMLElement {
       </div>
 
       <div class="section-title" style="margin-top:24px">📊 Live Gauge-sensorer <span style="font-size:11px;font-weight:400;opacity:.6">(valgfri)</span></div>
-      <div class="cfg-hint">Vises som runde gauges i Live Session-sektionen. Kun synlige hvis konfigureret. Brug f.eks. CPU%, GPU%, temperatur, volt, amps.</div>
+      <div class="cfg-hint">Vises som søjler i Live Session. Sæt <strong>Max værdi</strong> for at konvertere råværdi til % (fx clock MHz → %). Label med "temp" giver °C suffix automatisk.</div>
       ${[
-        { n:1, icon:"🔵", placeholder:"sensor.flemming_gamer_satellite_cpuload",      ex:"cpu"  },
-        { n:2, icon:"🟠", placeholder:"sensor.flemming_gamer_satellite_gpuload",      ex:"gpu"  },
-        { n:3, icon:"🟢", placeholder:"sensor.flemming_gamer_satellite_memoryusage",  ex:"ram"  },
-        { n:4, icon:"🟣", placeholder:"sensor.flemming_gamer_satellite_gputemperature", ex:"gpu °C" },
-        { n:5, icon:"🔵", placeholder:"sensor.flemmings_gamer_pc_currentclockspeed", ex:"mhz"  },
-      ].map(({ n, icon, placeholder, ex }) => `
-      <div class="cfg-grid" style="margin-top:${n===1?'0':'8px'}">
+        { n:1, icon:"🔵", placeholder:"sensor.flemming_gamer_satellite_cpuload",        ex:"CPU",       maxph:"100"  },
+        { n:2, icon:"🟠", placeholder:"sensor.flemming_gamer_satellite_gpuload",        ex:"GPU",       maxph:"100"  },
+        { n:3, icon:"🟢", placeholder:"sensor.flemming_gamer_satellite_memoryusage",    ex:"RAM",       maxph:"100"  },
+        { n:4, icon:"🟣", placeholder:"sensor.flemming_gamer_satellite_gputemperature", ex:"GPU temp",  maxph:""     },
+        { n:5, icon:"🔵", placeholder:"sensor.flemmings_gamer_pc_currentclockspeed",   ex:"Speed MHz", maxph:"5200" },
+      ].map(({ n, icon, placeholder, ex, maxph }) => `
+      <div class="cfg-grid cfg-grid-3" style="margin-top:${n===1?'0':'8px'}">
         <div class="cfg-field">
           <label class="cfg-label">${icon} Gauge ${n} — Sensor</label>
           <input class="cfg-gauge${n}-entity cfg-input" type="text"
@@ -1145,7 +1146,14 @@ class PcUserStatisticsPanel extends HTMLElement {
           <input class="cfg-gauge${n}-label cfg-input" type="text"
             value="${this._esc(cfg[`gauge${n}_label`] || '')}"
             placeholder="${ex}">
-          <span class="cfg-hint-small">Tekst vist i midten (f.eks. "${ex}")</span>
+          <span class="cfg-hint-small">Tekst under søjle (f.eks. "${ex}")</span>
+        </div>
+        <div class="cfg-field">
+          <label class="cfg-label">${icon} Gauge ${n} — Max <span class="cfg-optional">(valgfri)</span></label>
+          <input class="cfg-gauge${n}-max cfg-input" type="number" min="0" step="any"
+            value="${this._esc(cfg[`gauge${n}_max`] || '')}"
+            placeholder="${maxph}">
+          <span class="cfg-hint-small">Sæt max → viser %; tom → vis råværdi</span>
         </div>
       </div>`).join("")}
 
@@ -1197,16 +1205,13 @@ class PcUserStatisticsPanel extends HTMLElement {
     const sys = this._system;
     if (!sys) return `<div class="empty-state">Indlæser...</div>`;
 
-    // ── Write buffer ───────────────────────────────────────────
     const bufPct   = Math.round(sys.buffer_size / sys.buffer_max * 100);
     const bufColor = bufPct > 75 ? "#ef4444" : bufPct > 40 ? "#f59e0b" : "#10b981";
 
-    // ── System health indicators ───────────────────────────────
     const monthlyOk = sys.monthly_loaded === true;
     const bufOk     = sys.buffer_size === 0;
     const writeOk   = sys.last_write && sys.last_write !== "aldrig";
 
-    // Overall health: all green = ok, any red = warning
     const allOk = monthlyOk && bufOk;
     const healthColor  = allOk ? "#10b981" : "#f59e0b";
     const healthIcon   = allOk ? "✅" : "⚠️";
@@ -1244,7 +1249,6 @@ class PcUserStatisticsPanel extends HTMLElement {
         <span class="health-value" style="color:${r.ok ? "var(--text)" : "#f59e0b"}">${this._esc(r.value)}</span>
       </div>`).join("");
 
-    // ── Info cards ─────────────────────────────────────────────
     const cards = [
       ["Version",      sys.version],
       ["InfluxDB host", `${sys.influxdb_host}:${sys.influxdb_port}`],
@@ -1295,9 +1299,6 @@ class PcUserStatisticsPanel extends HTMLElement {
 
   // ── Main render ───────────────────────────────────────────────
   _render() {
-    // Don't rebuild the config tab DOM while the user is typing in an input/select —
-    // it would destroy focus and discard unsaved keystrokes.
-    // Exception: _forceRender is set when the user explicitly triggers a save/action.
     if (this._tab === "config" && !this._forceRender) {
       const active = this.shadowRoot?.activeElement;
       if (active && (active.tagName === "INPUT" || active.tagName === "SELECT" || active.tagName === "TEXTAREA")) {
@@ -1329,7 +1330,6 @@ class PcUserStatisticsPanel extends HTMLElement {
   _bind() {
     const root = this.shadowRoot;
 
-    // Tabs
     root.querySelectorAll(".tab").forEach(el => {
       el.addEventListener("click", () => {
         this._tab = el.dataset.tab;
@@ -1340,10 +1340,8 @@ class PcUserStatisticsPanel extends HTMLElement {
       });
     });
 
-    // Refresh
     root.querySelector(".refresh-btn")?.addEventListener("click", () => this._load());
 
-    // Hamburger
     root.querySelector(".menu-btn")?.addEventListener("click", () => {
       this.dispatchEvent(new Event("hass-toggle-menu",{bubbles:true,composed:true}));
     });
@@ -1512,12 +1510,8 @@ class PcUserStatisticsPanel extends HTMLElement {
       color: var(--text);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    /* ── Panel layout ── */
     .panel { display:flex; flex-direction:column; height:100%; min-height:0; }
     .tab-content { flex:1; overflow-y:auto; padding:16px; }
-
-    /* ── Header ── */
     .header { display:flex; align-items:center; justify-content:space-between;
       padding:14px 16px; background:var(--card2); border-bottom:1px solid var(--divider);
       gap:12px; transition:background .3s; }
@@ -1530,27 +1524,19 @@ class PcUserStatisticsPanel extends HTMLElement {
     .title    { font-size:16px; font-weight:700; white-space:nowrap; }
     .subtitle { font-size:12px; color:var(--subtext); display:flex; align-items:center; gap:5px; }
     .header-live .subtitle { color:rgba(255,255,255,0.85); }
-
-    /* ── Live dot ── */
     .live-dot { display:inline-block; width:7px; height:7px; border-radius:50%;
       background:#4ade80; box-shadow:0 0 6px #4ade80; animation:blink 1.4s infinite; }
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
-
-    /* ── Pulse ring ── */
     .pulse-ring-wrap { position:relative; display:inline-flex; align-items:center; justify-content:center; }
     .pulse-ring { position:absolute; width:36px; height:36px; border-radius:50%;
       border:2px solid rgba(255,255,255,0.5); animation:sonar 2s ease-out infinite; }
     .pulse-ring-2 { animation-delay:1s; }
     @keyframes sonar { 0%{transform:scale(1);opacity:0.8} 100%{transform:scale(2.2);opacity:0} }
     .icon { font-size:24px; position:relative; z-index:1; }
-
-    /* ── Watt gauge ── */
     .watt-gauge { display:flex; flex-direction:column; align-items:center; position:relative; }
     .gauge-svg { width:68px; height:40px; }
     .watt-center { position:absolute; bottom:0; left:50%; transform:translateX(-50%); text-align:center; }
     .watt-value { font-size:11px; font-weight:700; color:white; white-space:nowrap; }
-
-    /* ── Buttons ── */
     .refresh-btn, .menu-btn { background:rgba(255,255,255,0.15); border:none; border-radius:8px;
       width:36px; height:36px; cursor:pointer; display:flex; align-items:center; justify-content:center;
       color:white; transition:background .15s; }
@@ -1558,7 +1544,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     .refresh-btn svg, .menu-btn svg { width:20px; height:20px; fill:currentColor; }
     .header:not(.header-live) .refresh-btn, .header:not(.header-live) .menu-btn {
       background:var(--card); color:var(--subtext); border:1px solid var(--divider); }
-
     .save-btn { padding:10px 20px; background:var(--accent); color:white;
       border:none; border-radius:10px; font-size:14px; font-weight:600; cursor:pointer;
       transition:opacity .15s; }
@@ -1568,8 +1553,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       border:1px solid var(--divider); border-radius:10px; font-size:14px; cursor:pointer; }
     .add-btn { padding:6px 14px; background:var(--accent); color:white;
       border:none; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer; }
-
-    /* ── Tabs ── */
     .tabs { display:flex; overflow-x:auto; border-bottom:1px solid var(--divider);
       background:var(--card); scrollbar-width:none; justify-content:center; }
     .tabs::-webkit-scrollbar { display:none; }
@@ -1582,20 +1565,13 @@ class PcUserStatisticsPanel extends HTMLElement {
     .tab-icon { font-size:30px; }
     .tab-label { font-size:10px; }
     @media (max-width:600px) { .tab-label { display:none; } .tab { padding:12px 14px; } }
-
-    /* ── Section titles ── */
     .section-title { font-size:11px; font-weight:700; text-transform:uppercase;
       letter-spacing:.8px; color:var(--subtext); margin:20px 0 10px; }
     .section-title:first-child { margin-top:0; }
     .section-title-row { display:flex; align-items:center; justify-content:space-between; margin:20px 0 10px; }
-
-    /* ── Avatar ── */
     .avatar { width:36px; height:36px; border-radius:50%; display:flex; align-items:center;
       justify-content:center; font-weight:700; font-size:15px; color:white; flex-shrink:0; }
     .avatar.large { width:48px; height:48px; font-size:20px; }
-
-    /* ── Stat grid ── */
-    /* ── Live card ── */
     .live-card {
       display:flex; align-items:center; gap:0;
       background:var(--card2); border-radius:16px;
@@ -1631,8 +1607,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       flex-shrink:0; margin-left:auto;
       border-left:1px solid rgba(255,255,255,0.07); padding-left:20px;
     }
-
-    /* ── Monthly / Statistik tab ── */
     .statistik-layout { display:flex; gap:24px; align-items:flex-start; flex-wrap:wrap; }
     .statistik-left   { flex:1; min-width:0; }
     .statistik-right  { flex-shrink:0; width:220px; }
@@ -1644,8 +1618,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     .user-stat { display:flex; justify-content:space-between; font-size:13px; }
     .user-stat-label { color:var(--subtext); }
     .user-stat-value { font-weight:600; }
-
-    /* ── Donut ── */
     .donut-container { width:160px; display:flex; flex-direction:column; align-items:center; gap:10px; position:relative; }
     .donut-ring { position:relative; }
     .donut-svg { width:140px; height:140px; display:block; }
@@ -1658,8 +1630,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     .legend-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
     .legend-name { flex:1; text-transform:capitalize; }
     .legend-pct { color:var(--subtext); font-size:11px; }
-
-    /* ── Leaderboard ── */
     .leaderboard { display:flex; flex-direction:column; gap:8px; }
     .lb-row { display:flex; align-items:center; gap:12px;
       background:var(--card2); border-radius:12px; padding:12px 16px;
@@ -1676,8 +1646,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     .lb-stats { text-align:right; }
     .lb-time { font-size:14px; font-weight:700; color:var(--text); }
     .lb-cost { font-size:11px; color:var(--subtext); margin-top:1px; }
-
-    /* ── Users tab ── */
     .active-user-card { display:flex; align-items:center; gap:14px;
       background:color-mix(in srgb,var(--accent) 8%,var(--card2));
       border:2px solid var(--accent); border-radius:14px; padding:16px; margin-bottom:8px; }
@@ -1695,8 +1663,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     .user-row-info { flex:1; }
     .user-row-name { font-weight:600; text-transform:capitalize; }
     .user-row-mapping { font-size:12px; color:var(--subtext); margin-top:2px; }
-
-    /* ── Notifications ── */
     .device-section { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
     .device-row { display:flex; align-items:center; gap:10px;
       background:var(--card2); border-radius:10px; padding:10px 14px; cursor:pointer; }
@@ -1734,8 +1700,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     .del-btn { padding:6px 14px; border:none; border-radius:8px;
       background:color-mix(in srgb,#ef4444 15%,transparent); color:#ef4444; font-size:12px; cursor:pointer; font-weight:600; }
     .inline-edit { margin-top:14px; padding-top:14px; border-top:1px solid var(--divider); }
-
-    /* ── Toggle ── */
     .toggle { position:relative; display:inline-flex; align-items:center; cursor:pointer; flex-shrink:0; }
     .toggle input { opacity:0; width:0; height:0; position:absolute; }
     .toggle-slider { width:42px; height:24px; background:var(--divider); border-radius:12px;
@@ -1745,8 +1709,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       transition:transform .2s; box-shadow:0 1px 3px rgba(0,0,0,.2); }
     .toggle input:checked + .toggle-slider { background:var(--accent); }
     .toggle input:checked + .toggle-slider::after { transform:translateX(18px); }
-
-    /* ── Notification form ── */
     .create-form, .edit-form, .create-form-inner { padding-top:12px; }
     .form-row { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
     .form-row label { font-size:12px; font-weight:600; color:var(--subtext); min-width:100px; flex-shrink:0; }
@@ -1758,8 +1720,6 @@ class PcUserStatisticsPanel extends HTMLElement {
     .user-check { display:flex; align-items:center; gap:4px; font-size:13px; cursor:pointer; }
     .form-hint { font-size:11px; color:var(--subtext); margin-left:4px; }
     .form-actions { display:flex; gap:8px; margin-top:14px; }
-
-    /* ── Admin ── */
     .admin-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; margin-bottom:4px; }
     .admin-card { background:var(--card2); border-radius:10px; padding:14px; }
     .admin-card-label { font-size:11px; color:var(--subtext); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
@@ -1789,8 +1749,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       background:color-mix(in srgb,var(--accent) 6%,var(--card-background-color,#fff));
       border-left:3px solid var(--accent); border-radius:0 8px 8px 0;
       font-size:13px; color:var(--subtext); line-height:1.5; }
-
-    /* ── Tab sorter ── */
     .tab-sorter { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
     .tab-sort-item { display:flex; align-items:center; gap:12px;
       background:var(--card2); border-radius:10px; padding:11px 14px; cursor:grab;
@@ -1807,11 +1765,10 @@ class PcUserStatisticsPanel extends HTMLElement {
     .reset-tabs-btn { padding:6px 14px; border:1px solid var(--divider); border-radius:8px;
       background:transparent; color:var(--subtext); font-size:12px; cursor:pointer; margin-bottom:4px; }
     .reset-tabs-btn:hover { border-color:var(--accent); color:var(--accent); }
-
-    /* ── Config tab ── */
     .cfg-hint { font-size:12px; color:var(--subtext); margin-bottom:14px; line-height:1.5; }
     .cfg-hint-small { font-size:11px; color:var(--subtext); margin-top:3px; display:block; }
     .cfg-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:14px; }
+    .cfg-grid-3 { grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); }
     .cfg-field { display:flex; flex-direction:column; gap:4px; }
     .cfg-label { font-size:12px; font-weight:600; color:var(--subtext);
       text-transform:uppercase; letter-spacing:.5px; }
@@ -1847,8 +1804,6 @@ class PcUserStatisticsPanel extends HTMLElement {
       border-radius:10px; padding:14px 16px; }
     .cfg-info-title { font-size:13px; font-weight:600; margin-bottom:6px; color:var(--text); }
     .cfg-info-body  { font-size:12px; color:var(--subtext); line-height:1.6; }
-
-    /* ── History tab ── */
     .hist-toolbar { display:flex; align-items:center; justify-content:space-between;
       margin-bottom:16px; flex-wrap:wrap; gap:10px; }
     .metric-selector { display:flex; gap:6px; }
@@ -1876,16 +1831,11 @@ class PcUserStatisticsPanel extends HTMLElement {
     .day-bar-bg { height:6px; background:var(--divider); border-radius:3px; overflow:hidden; margin-bottom:3px; }
     .day-bar-fill { height:100%; border-radius:3px; }
     .day-val { font-size:12px; font-weight:600; }
-
-    /* ── Misc ── */
     .empty-state { text-align:center; color:var(--subtext); padding:40px 20px; font-size:14px; }
     .empty-state.small { padding:16px; font-size:13px; }
   `; }
 }
 
-// ── FIX: Guard against double-registration on HA navigate/reload ──────────────
-// Without this guard, HA re-executes the JS file on panel re-entry, causing:
-// "Failed to execute 'define' on 'CustomElementRegistry': name already used"
 if (!customElements.get("pc-user-statistics-panel")) {
   customElements.define("pc-user-statistics-panel", PcUserStatisticsPanel);
 }
