@@ -78,6 +78,24 @@ def ws_get_system(hass, connection, msg):
         connection.send_error(msg["id"], "not_ready", "Integration not ready"); return
     try:
         cfg = coordinator.config
+        import time as _time
+        now = _time.time()
+        last_write = coordinator.last_write_time
+        if last_write and last_write > 0 and (now - last_write) < 86400:
+            delta = now - last_write
+            if delta < 60:
+                last_write_str = f"{int(delta)}s siden"
+            elif delta < 3600:
+                last_write_str = f"{int(delta // 60)}m siden"
+            else:
+                last_write_str = f"{int(delta // 3600)}t {int((delta % 3600) // 60)}m siden"
+        elif not coordinator.current_user:
+            last_write_str = "ingen aktiv session"
+        else:
+            last_write_str = "aldrig"
+
+        monthly_str = "Indlæst ✓" if coordinator._monthly_loaded else "Afventer InfluxDB..."
+
         connection.send_result(msg["id"], {
             "version": __version__,
             "influxdb_host": cfg.get("host", "unknown"),
@@ -87,6 +105,10 @@ def ws_get_system(hass, connection, msg):
             "buffer_max": 100,
             "tracked_users": coordinator.tracked_users,
             "user_map": coordinator.user_map,
+            "current_user": coordinator.current_user or "ingen",
+            "monthly_loaded": coordinator._monthly_loaded,
+            "monthly_data": monthly_str,
+            "last_write": last_write_str,
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
