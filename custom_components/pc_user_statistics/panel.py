@@ -97,16 +97,9 @@ async def _async_register_lovelace_resource(
     url: str,
     url_base: str,
 ) -> None:
-    """Add or update the cards JS as a Lovelace resource.
-
-    Uses the lovelace integration's resource store directly.
-    Compatible with HA 2024.x+ where LovelaceData no longer has .mode/.resources.
-    """
+    """Add or update the cards JS as a Lovelace resource."""
     import asyncio
     try:
-        # In HA 2024.x the lovelace integration exposes resources via
-        # hass.data["lovelace_resources"] (a ResourceStorageCollection).
-        # Fall back to older hass.data["lovelace"].resources for compatibility.
         resources = hass.data.get("lovelace_resources")
 
         if resources is None:
@@ -125,7 +118,6 @@ async def _async_register_lovelace_resource(
             )
             return
 
-        # Wait until resources collection is loaded (up to 10 seconds)
         for _ in range(10):
             if getattr(resources, "loaded", True):
                 break
@@ -148,35 +140,22 @@ async def _async_register_lovelace_resource(
                 _LOGGER.debug("Cards Lovelace resource already up to date")
         else:
             await resources.async_create_item({"res_type": "module", "url": url})
-            _LOGGER.info(
-                "Registered cards Lovelace resource: %s — "
-                "custom:pc-user-statistics-user-card and "
-                "custom:pc-user-statistics-tablet-card are now available in the card picker",
-                url,
-            )
+            _LOGGER.info("Registered cards Lovelace resource: %s", url)
 
     except Exception as err:
         _LOGGER.error("Failed to register Lovelace resource: %s", err)
 
 
 def async_unregister_panel(hass: HomeAssistant) -> None:
-    """Remove the panel from the sidebar and clear the registration flag.
-
-    FIX: The _panel_registered flag must be cleared here. If it survives
-    into the next async_setup_entry() call, async_register_panel() skips
-    registration entirely — and the following unload then tries to remove
-    a panel that was never registered, producing "Removing unknown panel".
-    """
+    """Remove the panel from the sidebar and clear the registration flag."""
     from homeassistant.components import frontend
 
-    # Only call async_remove_panel if we actually registered it
     if hass.data.get(DOMAIN, {}).get("_panel_registered", False):
         frontend.async_remove_panel(hass, DOMAIN)
         _LOGGER.debug("Panel removed from sidebar")
     else:
         _LOGGER.debug("Panel was not registered, skipping removal")
 
-    # Always clear the flag so the next setup registers fresh
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN]["_panel_registered"] = False
 

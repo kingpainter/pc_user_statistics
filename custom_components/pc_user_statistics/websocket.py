@@ -249,20 +249,17 @@ async def _query_history(coordinator, days: int) -> dict:
         return {"days": [], "users": [], "series": {}}
 
     # Parse response
-    # Structure: results[0].series[] each has tags.user + columns + values
     results = data.get("results", [{}])
     series_list = results[0].get("series", []) if results else []
 
-    # Build a set of all day strings
     all_days: list[str] = []
-    user_series: dict[str, dict[str, dict]] = {}  # user → {day → {time,energy,cost}}
+    user_series: dict[str, dict[str, dict]] = {}
 
     for s in series_list:
         user = s.get("tags", {}).get("user", "unknown")
-        cols = s.get("columns", [])  # ["time","time","energy","cost"]
+        cols = s.get("columns", [])
         vals = s.get("values", [])
 
-        # find col indices
         try:
             t_idx = cols.index("time")
             tm_idx = cols.index("time", t_idx + 1) if cols.count("time") > 1 else 1
@@ -273,7 +270,6 @@ async def _query_history(coordinator, days: int) -> dict:
 
         user_series[user] = {}
         for row in vals:
-            # row[0] is the timestamp e.g. "2026-02-01T00:00:00Z"
             day = row[0][:10] if row[0] else ""
             if not day:
                 continue
@@ -308,17 +304,14 @@ def ws_get_config(hass, connection, msg):
     try:
         entry = coordinator.config_entry
         connection.send_result(msg["id"], {
-            # InfluxDB (from data — set at setup, not editable here)
             "host":           entry.data.get("host", ""),
             "port":           entry.data.get("port", 8086),
             "database":       entry.data.get("database", ""),
             "username":       entry.data.get("username", ""),
-            # Sensor entity IDs (from data)
             "user_entity":          entry.data.get("user_entity",         "sensor.flemming_gamer_satellite_loggeduser"),
             "watt_entity":          entry.data.get("watt_entity",          "sensor.gamer_pc_power_monitor_current_consumption"),
             "device_power_entity":  entry.data.get("device_power_entity", "sensor.gamer_pc_power_monitor_device_power"),
             "price_entity":         entry.data.get("price_entity",        "sensor.energi_data_service"),
-            # Optional gauge sensors (live display only, not stored in coordinator)
             "gauge1_entity":        entry.data.get("gauge1_entity", ""),
             "gauge1_label":         entry.data.get("gauge1_label", ""),
             "gauge1_max":           entry.data.get("gauge1_max", ""),
@@ -334,7 +327,6 @@ def ws_get_config(hass, connection, msg):
             "gauge5_entity":        entry.data.get("gauge5_entity", ""),
             "gauge5_label":         entry.data.get("gauge5_label", ""),
             "gauge5_max":           entry.data.get("gauge5_max", ""),
-            # User config (from options — raw, so ha_user dict values are preserved)
             "user_mappings":  entry.options.get("user_mappings", coordinator.user_map),
             "tracked_users":  coordinator.tracked_users,
         })
@@ -375,7 +367,6 @@ async def ws_save_config(hass, connection, msg):
     try:
         entry = coordinator.config_entry
 
-        # Validate inputs
         user_mappings = msg["user_mappings"]
         tracked_users = msg["tracked_users"]
 
@@ -384,7 +375,6 @@ async def ws_save_config(hass, connection, msg):
         if not isinstance(tracked_users, list) or not tracked_users:
             connection.send_error(msg["id"], "invalid_input", "tracked_users must be a non-empty list"); return
 
-        # Build new options (user config)
         from .const import CONF_USER_MAPPINGS, CONF_TRACKED_USERS
         new_options = {
             **entry.options,
@@ -392,12 +382,10 @@ async def ws_save_config(hass, connection, msg):
             CONF_TRACKED_USERS: tracked_users,
         }
 
-        # Build new data (sensor entity IDs) — only update fields that were sent
         new_data = dict(entry.data)
         for field in ("user_entity", "watt_entity", "device_power_entity", "price_entity"):
             if field in msg and msg[field].strip():
                 new_data[field] = msg[field].strip()
-        # Gauge sensors — allow empty string to clear
         for field in ("gauge1_entity", "gauge1_label", "gauge1_max",
                       "gauge2_entity", "gauge2_label", "gauge2_max",
                       "gauge3_entity", "gauge3_label", "gauge3_max",
@@ -406,7 +394,6 @@ async def ws_save_config(hass, connection, msg):
             if field in msg:
                 new_data[field] = msg[field].strip()
 
-        # Save both — this triggers _async_options_updated → reload
         hass.config_entries.async_update_entry(entry, data=new_data, options=new_options)
 
         _LOGGER.info("Configuration saved — integration will reload")
