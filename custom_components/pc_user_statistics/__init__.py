@@ -1,7 +1,14 @@
 # File Name: __init__.py
-# Version: 2.7.3
+# Version: 2.7.4
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: March 29, 2026
+# Last Updated: May 15, 2026
+#
+# Changes in 2.7.4:
+#   FIX: last_write_time initialised to 0.0 instead of time.time().
+#        system_health.py uses last_write_time > 0 to detect whether a real
+#        write has occurred. Initialising to time.time() made health always
+#        show a recent (fake) write time on startup, hiding the "aldrig" state.
+#        Now correctly shows "aldrig" until the first successful InfluxDB write.
 #
 # Changes in 2.7.3:
 #   FIX 1: Session snapshot now flushed to disk on EVERY successful InfluxDB write.
@@ -290,7 +297,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.last_time: float = time.time()
         self.last_power: float = 0.0
         self.last_month: int = datetime.now(timezone.utc).month
-        self.last_write_time: float = time.time()
+        # FIX v2.7.4: initialised to 0.0 (not time.time()) so system_health
+        # correctly shows "aldrig" until the first real InfluxDB write occurs.
+        self.last_write_time: float = 0.0
 
         # ── Cached entity IDs — read once at init, not on every state lookup ──
         self._user_entity: str   = config_entry.data.get("user_entity",          USER_ENTITY)
@@ -393,11 +402,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             field_mappings = {"time": 1, "energy": 2, "cost": 3}
             parsed_data = parse_influxdb_response(data, field_mappings)
 
-            # REPLACE self.monthly with the authoritative InfluxDB totals,
-            # then add any deltas that accumulated in self._pending while the
-            # load was in progress. This is the only safe pattern:
-            #   - REPLACE avoids double-counting InfluxDB data
-            #   - Adding _pending captures any real activity since startup
             new_monthly: dict[str, dict[str, float]] = {
                 user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
                 for user in self.tracked_users
@@ -443,7 +447,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     "Monthly totals will start from 0 and accumulate from now.",
                     max_retries, err,
                 )
-                # Mark as loaded with zeros so panel doesn't show spinner forever
                 self._monthly_loaded = True
 
         except Exception as err:
@@ -451,17 +454,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             self._monthly_loaded = True
 
     async def _async_restore_session(self, store: "NotificationStore") -> None:
-        """Restore in-progress session from persistent store after HA restart.
-
-        Called directly from async_setup_entry with the store instance — this
-        avoids any timing dependency on hass.data population order.
-
-        Restores acc_time / acc_energy / acc_cost if HA restarted while a user
-        was active. Safety checks:
-          - Snapshot must be < 4 hours old (avoids restoring after PC was off)
-          - Saved user must still be in tracked_users
-          - Live sensor must not already show a different user
-        """
+        """Restore in-progress session from persistent store after HA restart."""
         if not store:
             _LOGGER.debug("Session restore: store not available")
             return
@@ -476,7 +469,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         now = time.time()
         age = now - saved_at
 
-        # Reject stale snapshots — PC was likely off
         if age > 4 * 3600:
             _LOGGER.info(
                 "Session restore: snapshot %.0f min old — too stale, discarding",
@@ -485,7 +477,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             await store.async_clear_session()
             return
 
-        # Only restore if the saved user is still configured
         if saved_user and saved_user not in self.tracked_users:
             _LOGGER.warning(
                 "Session restore: user '%s' not in tracked_users — discarding",
@@ -494,7 +485,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             await store.async_clear_session()
             return
 
-        # If a different user is already live on the sensor, don't overwrite
         try:
             sensor_state = self.hass.states.get(self._user_entity)
             if sensor_state and sensor_state.state not in ("unavailable", "unknown", "none", ""):
@@ -510,12 +500,10 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.warning("Session restore: could not read user sensor: %s", err)
 
-        # All checks passed — restore session accumulators
         self.current_user = saved_user
         self.acc_time     = snapshot.get("acc_time",   0.0)
         self.acc_energy   = snapshot.get("acc_energy", 0.0)
         self.acc_cost     = snapshot.get("acc_cost",   0.0)
-        # Set last_time = now so next poll delta starts from this moment
         self.last_time       = now
         self.last_write_time = now
 
@@ -531,7 +519,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         """Called by the coordinator at regular intervals."""
         now = time.time()
 
-        # Roll over monthly totals on month change
         current_month = datetime.now(timezone.utc).month
         if current_month != self.last_month:
             _LOGGER.info(
@@ -550,22 +537,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             await self._async_load_monthly_data()
             self.last_month = current_month
 
-        # Retry any buffered writes
         if self.failed_writes:
             await self._retry_failed_writes()
 
-        # Only write to InfluxDB once monthly data has loaded — avoids double-counting
-        # deltas that are already included in the InfluxDB monthly sum.
         if self._monthly_loaded:
             await self._calculate_deltas(now)
-            # Update last_time only when we actually calculated a delta.
-            # If monthly data isn't loaded yet, we skip the calculation entirely
-            # and must NOT advance last_time — otherwise those seconds are lost forever.
             self.last_time = now
         else:
             _LOGGER.debug("Monthly data not yet loaded — skipping InfluxDB write this poll")
 
-        # Evaluate notification rules
         try:
             nm = self.hass.data.get(DOMAIN, {}).get("notification_manager")
             if nm:
@@ -589,10 +569,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         if entity_id == self._user_entity:
             await self._handle_user_change(event, now)
-            # Note: last_time is set inside _handle_user_change for user events
         elif entity_id == self._watt_entity and self.current_user:
             await self._handle_power_change(now)
-            # Update last_time for power-change events
             self.last_time = now
 
         self.async_set_updated_data(self._get_data())
@@ -608,7 +586,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         raw_mapped = self.user_map.get(user_key) if user_key is not None else None
 
-        # Defensive: guard against dict values that slipped through normalization
         if isinstance(raw_mapped, dict):
             _LOGGER.warning(
                 "user_map returned a dict for key '%s' — normalizing on the fly: %s",
@@ -620,10 +597,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         else:
             new_user = None
 
-        # Detect same-user re-login: PC was shut down without a logout event,
-        # so current_user was never cleared. The user sensor fires again with
-        # the same value when the PC boots. Treat this as a new session if
-        # last_time is stale (>10 min gap) — meaning PC was off during that time.
         same_user_relogin = (
             new_user is not None
             and new_user == self.current_user
@@ -641,44 +614,30 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 _LOGGER.info("User changed: %s → %s", self.current_user, new_user)
 
             if self.current_user and not same_user_relogin:
-                # Only force-write on real user change, not re-login
-                # (nothing meaningful to write — PC was off)
                 await self._calculate_deltas(now, force_write=True)
 
             self.current_user = new_user
             if new_user:
-                # User logged in — clear idle timer, reset session accumulators
                 self._idle_since = None
                 self.acc_time = 0.0
                 self.acc_energy = 0.0
                 self.acc_cost = 0.0
                 self.last_power = self._get_power()
 
-                # Reset non-repeating notification rules so they fire again
-                # in this new session (they would otherwise never fire again)
                 store = self.hass.data.get(DOMAIN, {}).get("store")
                 if store:
                     store.reset_session_sent(new_user)
 
-                # Persist login immediately — if HA restarts within the first
-                # ~60s of a session (before the first InfluxDB write), the
-                # snapshot would otherwise be empty or stale. One disk write
-                # at login ensures current_user is always recoverable.
                 _store = self.hass.data.get(DOMAIN, {}).get("store")
                 if _store:
                     _store.save_session_in_memory(new_user, 0.0, 0.0, 0.0, now)
                     self.hass.async_create_task(_store.async_flush_session())
             else:
-                # User logged out — start idle timer
                 self._idle_since = now
-                # Clear session snapshot so a stale session is never restored
-                # after a clean logout + HA restart
                 _store = self.hass.data.get(DOMAIN, {}).get("store")
                 if _store:
                     self.hass.async_create_task(_store.async_clear_session())
 
-            # reset last_time so deltas start from this moment, not from
-            # whenever the previous session's last event was.
             self.last_time = now
             self.last_write_time = now
 
@@ -716,8 +675,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.acc_energy += energy_delta
         self.acc_cost   += cost_delta
 
-        # Before InfluxDB load completes, accumulate into _pending.
-        # After load, accumulate directly into monthly (which is now authoritative).
         target = self.monthly if self._monthly_loaded else self._pending
         if self.current_user in target:
             target[self.current_user]["time"]   += delta_time
@@ -767,10 +724,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         if success:
             self._clear_repair_issue()
             self._consecutive_write_failures = 0
-            # Persist session snapshot to disk on every successful InfluxDB write.
-            # MUST use async_flush_session() — NOT save_session_in_memory() alone.
-            # notification_manager.async_flush() is conditional on any_sent, so
-            # if no notification rules fire the snapshot never reaches disk otherwise.
             _store = self.hass.data.get(DOMAIN, {}).get("store")
             if _store:
                 _store.save_session_in_memory(
@@ -785,10 +738,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             self._consecutive_write_failures += 1
             self._maybe_raise_repair_issue()
             self._buffer_failed_write({"point": point, "timestamp": timestamp_ns, "attempts": 1})
-            # Session snapshot is saved even when InfluxDB is down — ensures
-            # acc_time is preserved across HA restarts even if writes are failing.
-            # Uses async_flush_session() for an immediate disk write (cannot
-            # piggyback on notification flush when InfluxDB is unreachable).
             _store = self.hass.data.get(DOMAIN, {}).get("store")
             if _store:
                 _store.save_session_in_memory(
@@ -891,8 +840,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
     def _get_data(self) -> dict[str, Any]:
         """Return current data snapshot for coordinator listeners and sensors."""
-        # If monthly load hasn't completed, combine monthly (zeroes) + pending
-        # so the panel shows real accumulated values rather than 0 during startup.
         if self._monthly_loaded:
             monthly_view = self.monthly
         else:

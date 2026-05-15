@@ -7,7 +7,7 @@ from typing import Final
 
 # Integration metadata
 DOMAIN: Final = "pc_user_statistics"
-__version__: Final = "2.7.2"
+__version__: Final = "2.7.4"
 
 # Device identifiers
 HUB_DEVICE_ID: Final = "statistics_hub"
