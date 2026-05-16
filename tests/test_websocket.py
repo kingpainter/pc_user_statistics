@@ -214,6 +214,6 @@ class TestWsGetDevices:
         ws_get_devices(hass, connection, {"id": 1})
         connection.send_result.assert_called_once()
         result = connection.send_result.call_args[0][1]
-        assert "configured" in result
+        assert "devices" in result
         assert "available" in result
-        assert result["configured"] == ["mobile_app_phone"]
+        assert result["devices"] == ["mobile_app_phone"]

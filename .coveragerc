@@ -1,0 +1,11 @@
+[run]
+source = custom_components/pc_user_statistics
+omit =
+    */panel.py
+    */system_health.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
