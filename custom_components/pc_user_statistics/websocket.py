@@ -31,8 +31,12 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
 
 def _get_coordinator(hass):
     for value in hass.data.get(DOMAIN, {}).values():
-        if hasattr(value, "tracked_users"):
-            return value
+        try:
+            users = value.tracked_users
+            if isinstance(users, list):
+                return value
+        except AttributeError:
+            continue
     return None
 
 def _get_store(hass):
@@ -77,11 +81,14 @@ def ws_get_system(hass, connection, msg):
     if not coordinator:
         connection.send_error(msg["id"], "not_ready", "Integration not ready"); return
     try:
-        cfg = coordinator.config
+        cfg = coordinator.config if isinstance(coordinator.config, dict) else {}
         import time as _time
         now = _time.time()
-        last_write = coordinator.last_write_time
-        if last_write and last_write > 0 and (now - last_write) < 86400:
+        try:
+            last_write = float(coordinator.last_write_time or 0)
+        except (TypeError, ValueError):
+            last_write = 0.0
+        if last_write > 0 and (now - last_write) < 86400:
             delta = now - last_write
             if delta < 60:
                 last_write_str = f"{int(delta)}s siden"
@@ -89,10 +96,11 @@ def ws_get_system(hass, connection, msg):
                 last_write_str = f"{int(delta // 60)}m siden"
             else:
                 last_write_str = f"{int(delta // 3600)}t {int((delta % 3600) // 60)}m siden"
-        elif not coordinator.current_user:
-            last_write_str = "ingen aktiv session"
         else:
-            last_write_str = "aldrig"
+            try:
+                last_write_str = "ingen aktiv session" if not coordinator.current_user else "aldrig"
+            except Exception:
+                last_write_str = "ukendt"
 
         monthly_str = "Indlæst ✓" if coordinator._monthly_loaded else "Afventer InfluxDB..."
 
@@ -192,7 +200,7 @@ def ws_get_devices(hass, connection, msg):
         connection.send_error(msg["id"], "not_ready", "Store not ready"); return
     try:
         connection.send_result(msg["id"], {
-            "configured": store.get_devices(),
+            "devices": store.get_devices(),
             "available": store.get_available_mobile_apps(hass),
         })
     except Exception as err:

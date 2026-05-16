@@ -47,11 +47,12 @@ class NotificationManager:
         Checks each enabled rule against current state and fires if triggered.
         Batches all store writes into a single flush at the end.
         """
-        rules = self._store.get_rules()
         devices = self._store.get_devices()
 
         if not devices:
             return  # No devices configured — nothing to send
+
+        rules = self._store.get_rules()
 
         data = coordinator.data or {}
         current_user: str | None = data.get("current_user")

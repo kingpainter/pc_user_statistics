@@ -215,25 +215,20 @@ class NotificationStore:
         self._data.setdefault("last_sent", {})[f"{rule_id}_{user}"] = timestamp
 
     def reset_session_sent(self, user: str) -> None:
-        """Clear last_sent for all non-repeating rules for a user.
+        """Clear last_sent for all rules for a user on new session start.
 
-        Called when a user's session starts so non-repeating rules (repeat=False)
-        fire again in the new session. Without this, a non-repeating rule that
-        fired once will NEVER fire again for that user — even the next day.
-
-        Repeating rules are NOT reset here — they use their own repeat_interval.
+        Called when a user's session starts so all per-session rules fire again.
+        Removes every key matching <rule_id>_<user> from last_sent regardless
+        of repeat setting — repeating rules will re-arm from the new session
+        start, and non-repeating rules get a clean slate for the next session.
         """
-        rules = self._data.get("rules", {})
         last_sent = self._data.get("last_sent", {})
-        changed = False
-        for rule_id, rule in rules.items():
-            if not rule.get("repeat", False):
-                key = f"{rule_id}_{user}"
-                if key in last_sent:
-                    del last_sent[key]
-                    changed = True
-        if changed:
-            _LOGGER.debug("Cleared non-repeating last_sent for user '%s' on new session", user)
+        suffix = f"_{user}"
+        keys_to_delete = [k for k in last_sent if k.endswith(suffix)]
+        for key in keys_to_delete:
+            del last_sent[key]
+        if keys_to_delete:
+            _LOGGER.debug("Cleared last_sent for user '%s' on new session (%d entries)", user, len(keys_to_delete))
 
     async def async_flush(self) -> None:
         """Persist current in-memory state to disk.
