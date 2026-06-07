@@ -1,18 +1,15 @@
 # File Name: store.py
-# Version: 2.7.0
+# Version: 2.8.0
 # Description: Persistent storage for notification rules using HA store (.storage).
-# Last Updated: March 14, 2026
+# Last Updated: June 5, 2026
 #
-# Changes in 2.7.0:
-#   - Added session persistence: save_session() / get_session() / clear_session()
-#     Allows __init__.py coordinator to survive HA restarts mid-session without
-#     losing accumulated time/energy/cost. Session is saved on every InfluxDB
-#     write (~60s) and restored at coordinator startup.
-#
-# Changes in 2.5.1:
-#   - Added mark_sent_in_memory() — updates last_sent in RAM without disk write
-#   - Added async_flush() — single disk flush after all rules are evaluated
-#     Previously async_mark_sent() wrote to disk on every triggered rule (every 60s)
+# Changes in 2.8.0:
+#   NEW: Split storage into two independent keys:
+#        - pc_user_statistics.config  — notification rules + devices
+#        - pc_user_statistics.session — session snapshot only
+#        Isolates corruption: a corrupt session file no longer wipes rules/devices
+#        and vice versa. Session key is flushed aggressively (every 60s) while
+#        config key is only written on actual rule/device changes.
 
 from __future__ import annotations
 
@@ -27,7 +24,8 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_KEY = f"{DOMAIN}.notifications"
+STORAGE_KEY = f"{DOMAIN}.config"
+SESSION_STORAGE_KEY = f"{DOMAIN}.session"
 STORAGE_VERSION = 1
 
 # ── Premade rule templates ──────────────────────────────────────────────────
@@ -84,32 +82,40 @@ PREMADE_RULES: list[dict[str, Any]] = [
 
 
 class NotificationStore:
-    """Handles persistent storage of notification rules and session state."""
+    """Handles persistent storage of notification rules and session state.
+
+    Two separate storage keys are used:
+      - pc_user_statistics.config   — notification rules and device list
+      - pc_user_statistics.session  — session snapshot (flushed every 60s)
+
+    Splitting them means a corrupt/stale session file cannot wipe notification
+    rules and vice versa.
+    """
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._store: Store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._session_store: Store = Store(hass, STORAGE_VERSION, SESSION_STORAGE_KEY)
         self._data: dict[str, Any] = {}
+        self._session_data: dict[str, Any] = {}
 
     async def async_load(self) -> None:
-        """Load data from storage, seeding premade rules if first run."""
+        """Load data from both storage keys, seeding premade rules if first run."""
+        # ── Config store (rules + devices) ──────────────────────────────────
         try:
             stored = await self._store.async_load()
         except Exception as err:
             _LOGGER.error(
-                "Failed to load notification store (corrupt storage?) — seeding defaults: %s", err
+                "Failed to load config store (corrupt storage?) — seeding defaults: %s", err
             )
             stored = None
 
         if stored is None:
-            _LOGGER.info("No notification store found — seeding premade rules")
+            _LOGGER.info("No config store found — seeding premade rules")
             self._data = self._seed_defaults()
             await self._store.async_save(self._data)
         else:
             self._data = stored
-            # Ensure keys exist for older installs upgrading from previous versions
             self._data.setdefault("last_sent", {})
-            self._data.setdefault("session", {})
-            # Add any new premade rules introduced in newer versions
             updated = False
             for rule in PREMADE_RULES:
                 if rule["id"] not in self._data.get("rules", {}):
@@ -122,10 +128,24 @@ class NotificationStore:
             if updated:
                 await self._store.async_save(self._data)
 
-        _LOGGER.debug("Notification store loaded: %d rules", len(self._data.get("rules", {})))
+        # ── Session store (snapshot only) ───────────────────────────────────
+        try:
+            session_stored = await self._session_store.async_load()
+            self._session_data = session_stored if isinstance(session_stored, dict) else {}
+        except Exception as err:
+            _LOGGER.warning(
+                "Failed to load session store — starting fresh session: %s", err
+            )
+            self._session_data = {}
+
+        _LOGGER.debug(
+            "Stores loaded: %d rules, session=%s",
+            len(self._data.get("rules", {})),
+            "present" if self._session_data else "empty",
+        )
 
     def _seed_defaults(self) -> dict[str, Any]:
-        """Create default store structure with all premade rules disabled."""
+        """Create default config store structure with all premade rules disabled."""
         rules = {}
         for rule in PREMADE_RULES:
             rules[rule["id"]] = {
@@ -137,7 +157,6 @@ class NotificationStore:
             "rules": rules,
             "devices": [],
             "last_sent": {},
-            "session": {},
         }
 
     # ── Rules ───────────────────────────────────────────────────────────────
@@ -251,22 +270,13 @@ class NotificationStore:
     # ── Session persistence ──────────────────────────────────────────────────
 
     def get_session(self) -> dict[str, Any] | None:
-        """Return the last saved session snapshot, or None if empty.
-
-        The snapshot contains:
-          - current_user: str | None
-          - acc_time: float      (seconds accumulated this session)
-          - acc_energy: float    (kWh accumulated this session)
-          - acc_cost: float      (DKK accumulated this session)
-          - last_time: float     (unix timestamp of last delta calculation)
-          - saved_at: float      (unix timestamp when snapshot was written)
+        """Return the last saved session snapshot from the dedicated session store.
 
         Returns None if no session has been saved yet (first run / after clear).
         """
-        session = self._data.get("session", {})
-        if not session:
+        if not self._session_data:
             return None
-        return session
+        return self._session_data
 
     def save_session_in_memory(
         self,
@@ -275,37 +285,43 @@ class NotificationStore:
         acc_energy: float,
         acc_cost: float,
         last_time: float,
+        ms_screen_time: int | None = None,
+        ms_screen_time_date: str | None = None,
     ) -> None:
         """Update session snapshot in RAM — no disk write.
 
-        Call async_flush() or async_flush_session() afterwards to persist.
-        Designed to be called at the same time as an InfluxDB write so we
-        never incur an extra disk write just for session state.
+        Call async_flush_session() afterwards to persist to the dedicated session store.
+
+        ms_screen_time: Microsoft Family Safety screen_time in minutes at snapshot time.
+        ms_screen_time_date: ISO date string (YYYY-MM-DD) the screen_time belongs to.
+        Both are optional — only set when a Family Safety mapping exists for the user.
         """
-        self._data["session"] = {
+        self._session_data = {
             "current_user": current_user,
             "acc_time": acc_time,
             "acc_energy": acc_energy,
             "acc_cost": acc_cost,
             "last_time": last_time,
             "saved_at": time.time(),
+            "ms_screen_time": ms_screen_time,
+            "ms_screen_time_date": ms_screen_time_date,
         }
 
     async def async_flush_session(self) -> None:
-        """Persist session snapshot to disk immediately.
+        """Persist session snapshot to the dedicated session store.
 
-        Use this when we need to save session state WITHOUT also flushing
-        notification state (e.g. on logout where no InfluxDB write occurs).
+        Uses a separate storage key from config/rules so frequent session
+        writes (every 60s) do not touch the config store.
         """
-        await self._store.async_save(self._data)
+        await self._session_store.async_save(self._session_data)
         _LOGGER.debug("Session snapshot flushed to disk")
 
     async def async_clear_session(self) -> None:
-        """Clear the session snapshot from disk.
+        """Clear the session snapshot from the dedicated session store.
 
         Called on clean logout so a stale session is never restored on the
         next HA startup. Does NOT affect notification rules or devices.
         """
-        self._data["session"] = {}
-        await self._store.async_save(self._data)
+        self._session_data = {}
+        await self._session_store.async_save({})
         _LOGGER.debug("Session snapshot cleared from disk")

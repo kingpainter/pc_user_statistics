@@ -1,9 +1,15 @@
 // PC User Statistics – Custom Lovelace Cards
-// Version: 2.5.0
+// Version: 2.6.0
 // Cards:
 //   custom:pc-user-statistics-user-card   – compact single-user card (mobile)
 //   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop)
-// Last Updated: March 2, 2026
+// Last Updated: June 5, 2026
+//
+// Changes in 2.6.0:
+//   NEW: Microsoft Family Safety screen_time shown in both cards
+//   NEW: Active avatar glow ring on live session
+//   NEW: Monthly stat boxes get icons and accent tint for active user
+//   UPX: Leaderboard bars thicker (5px) with smooth width transition
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
@@ -31,6 +37,14 @@ function userColor(name, trackedUsers) {
   let h = 0;
   for (const c of n) h = c.charCodeAt(0) + h * 31;
   return COLORS[Math.abs(h) % COLORS.length];
+}
+
+function fmtScreenTime(min) {
+  if (min == null || min < 0) return null;
+  if (min === 0) return "0m";
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  return h > 0 ? `${h}t ${m}m` : `${m}m`;
 }
 
 function esc(s) {
@@ -73,6 +87,7 @@ class PcUserStatisticsUserCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._hass    = null;
     this._stats   = null;
+    this._fs      = null;
     this._config  = {};
     this._interval = null;
     this._errCount = 0;
@@ -104,7 +119,12 @@ class PcUserStatisticsUserCard extends HTMLElement {
   async _load() {
     if (!this._hass) return;
     try {
-      this._stats = await this._hass.callWS({ type: `${DOMAIN}/get_stats` });
+      const [stats, fs] = await Promise.all([
+        this._hass.callWS({ type: `${DOMAIN}/get_stats` }),
+        this._hass.callWS({ type: `${DOMAIN}/get_family_safety` }).catch(() => null),
+      ]);
+      this._stats = stats;
+      if (fs) this._fs = fs;
       this._errCount = 0;
     } catch (e) {
       this._errCount++;
@@ -204,6 +224,11 @@ class PcUserStatisticsUserCard extends HTMLElement {
     const sessionEng  = isActive ? (s?.acc_energy ?? 0) : 0;
     const sessionCost = isActive ? (s?.acc_cost   ?? 0) : 0;
 
+    // Microsoft Family Safety screen_time for this user
+    const fsUser  = this._fs?.users?.[user];
+    const fsMin   = fsUser?.screen_time_min ?? null;
+    const fsFmt   = fmtScreenTime(fsMin);
+
     const activeBadge = isActive
       ? `<span class="badge-live">● LIVE</span>`
       : `<span class="badge-idle">Inaktiv</span>`;
@@ -248,6 +273,10 @@ class PcUserStatisticsUserCard extends HTMLElement {
         }
         .badge-live  { font-size: 11px; font-weight: 700; color: #10b981; letter-spacing: .5px; }
         .badge-idle  { font-size: 11px; color: var(--sub); }
+        .avatar-glow { box-shadow: 0 0 0 3px var(--glow-color, transparent), 0 0 12px 2px var(--glow-color, transparent); transition: box-shadow .4s; }
+        .ms-row { display:flex; align-items:center; gap:6px; margin-top:6px; padding:6px 8px; background:rgba(139,92,246,0.10); border-radius:8px; border-left:3px solid #8b5cf6; }
+        .ms-label { font-size:10px; color:#8b5cf6; font-weight:600; text-transform:uppercase; letter-spacing:.5px; flex:1; }
+        .ms-val   { font-size:13px; font-weight:700; color:#8b5cf6; }
 
         .divider { height: 1px; background: var(--div); margin: 10px 0; }
 
@@ -275,6 +304,7 @@ class PcUserStatisticsUserCard extends HTMLElement {
           background: var(--bg2); border-radius: 10px;
           padding: 8px 6px; text-align: center;
         }
+        .m-icon { font-size: 16px; margin-bottom: 2px; }
         .m-val { font-size: 13px; font-weight: 700; }
         .m-lbl { font-size: 10px; color: var(--sub); margin-top: 2px; }
 
@@ -319,10 +349,10 @@ class PcUserStatisticsUserCard extends HTMLElement {
         .lb-time { font-size: 13px; font-weight: 700; }
         .lb-cost { font-size: 10px; color: var(--sub); }
         .lb-bar-bg {
-          height: 3px; background: var(--div); border-radius: 2px;
-          margin-top: 4px; overflow: hidden;
+          height: 5px; background: var(--div); border-radius: 3px;
+          margin-top: 5px; overflow: hidden;
         }
-        .lb-bar-fill { height: 100%; border-radius: 2px; transition: width .4s; }
+        .lb-bar-fill { height: 100%; border-radius: 3px; transition: width .6s cubic-bezier(.4,0,.2,1); }
 
         .donut-initials {
           display: flex; flex-direction: column; justify-content: center; gap: 4px;
@@ -338,7 +368,7 @@ class PcUserStatisticsUserCard extends HTMLElement {
       <ha-card>
         <div class="card">
           <div class="header">
-            <div class="avatar">${initial}</div>
+            <div class="avatar ${isActive ? 'avatar-glow' : ''}" style="--glow-color:${isActive ? color+'99' : 'transparent'}">${initial}</div>
             <div class="header-info">
               <div class="user-name">${esc(title)}</div>
               ${s ? activeBadge : '<span class="badge-idle">Indlæser…</span>'}
@@ -365,20 +395,30 @@ class PcUserStatisticsUserCard extends HTMLElement {
                 <div class="stat-lbl">Pris</div>
               </div>
             </div>
+            ${fsFmt ? `
+            <div class="ms-row">
+              <span class="ms-label">🖥️ Skærm tid i dag</span>
+              <span class="ms-val">${fsFmt}</span>
+            </div>` : ""}
+            <div style="display:none"><!-- ms-placeholder-end -->
+            </div>
 
             <div class="divider"></div>
 
             <div class="section-label">Denne måned</div>
             <div class="monthly-grid">
-              <div class="m-box">
+              <div class="m-box" style="${isActive ? `border:1px solid ${color}33;background:${color}11` : ''}">
+                <div class="m-icon">⏱️</div>
                 <div class="m-val">${fmtTime(monthly.time)}</div>
                 <div class="m-lbl">Tid</div>
               </div>
-              <div class="m-box">
+              <div class="m-box" style="${isActive ? `border:1px solid ${color}33;background:${color}11` : ''}">
+                <div class="m-icon">⚡</div>
                 <div class="m-val">${fmtEnergy(monthly.energy)}</div>
                 <div class="m-lbl">Energi</div>
               </div>
-              <div class="m-box">
+              <div class="m-box" style="${isActive ? `border:1px solid ${color}33;background:${color}11` : ''}">
+                <div class="m-icon">💰</div>
                 <div class="m-val">${fmtCost(monthly.cost)}</div>
                 <div class="m-lbl">Pris</div>
               </div>
@@ -420,6 +460,7 @@ class PcUserStatisticsTabletCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     this._hass       = null;
     this._stats      = null;
+    this._fs         = null;
     this._config     = {};
     this._gaugeConfig = null; // loaded once from get_config
     this._interval   = null;
@@ -442,12 +483,14 @@ class PcUserStatisticsTabletCard extends HTMLElement {
   async _loadAll() {
     if (!this._hass) return;
     try {
-      const [stats, cfg] = await Promise.all([
+      const [stats, cfg, fs] = await Promise.all([
         this._hass.callWS({ type: `${DOMAIN}/get_stats` }),
         this._hass.callWS({ type: `${DOMAIN}/get_config` }),
+        this._hass.callWS({ type: `${DOMAIN}/get_family_safety` }).catch(() => null),
       ]);
       this._stats = stats;
       this._gaugeConfig = cfg;
+      if (fs) this._fs = fs;
       this._errCount = 0;
     } catch (e) {
       this._errCount++;
@@ -467,11 +510,16 @@ class PcUserStatisticsTabletCard extends HTMLElement {
     clearInterval(this._interval);
   }
 
-  // Polling: only refresh stats (gauge config is static, loaded once)
+  // Polling: refresh stats + family safety (gauge config is static, loaded once)
   async _loadStats() {
     if (!this._hass) return;
     try {
-      this._stats = await this._hass.callWS({ type: `${DOMAIN}/get_stats` });
+      const [stats, fs] = await Promise.all([
+        this._hass.callWS({ type: `${DOMAIN}/get_stats` }),
+        this._hass.callWS({ type: `${DOMAIN}/get_family_safety` }).catch(() => null),
+      ]);
+      this._stats = stats;
+      if (fs) this._fs = fs;
       this._errCount = 0;
     } catch (e) {
       this._errCount++;
@@ -621,20 +669,24 @@ class PcUserStatisticsTabletCard extends HTMLElement {
 
     // Monthly user cards
     const userCardsHTML = users.map(u => {
-      const d     = monthly[u] ?? {};
-      const color = userColor(u, users);
-      const isAct = s?.current_user === u;
+      const d      = monthly[u] ?? {};
+      const color  = userColor(u, users);
+      const isAct  = s?.current_user === u;
+      const fsMin  = this._fs?.users?.[u]?.screen_time_min ?? null;
+      const fsFmt  = fmtScreenTime(fsMin);
+      const glowStyle = isAct ? `box-shadow:0 0 0 2px ${color}99,0 0 10px 1px ${color}66` : "";
       return `
         <div class="user-card ${isAct ? "user-card-active" : ""}" style="${isAct ? `border-color:${color}` : ""}">
           <div class="user-card-header">
-            <div class="avatar sm" style="background:${color}">${u[0].toUpperCase()}</div>
+            <div class="avatar sm" style="background:${color};${glowStyle}">${u[0].toUpperCase()}</div>
             <div class="user-card-name">${esc(u)}</div>
             ${isAct ? `<span class="live-dot" style="color:${color}">●</span>` : ""}
           </div>
           <div class="user-stats">
-            <div class="u-row"><span class="u-lbl">Tid</span><span class="u-val">${fmtTime(d.time)}</span></div>
-            <div class="u-row"><span class="u-lbl">Energi</span><span class="u-val">${fmtEnergy(d.energy)}</span></div>
-            <div class="u-row"><span class="u-lbl">Pris</span><span class="u-val">${fmtCost(d.cost)}</span></div>
+            <div class="u-row"><span class="u-lbl">⏱️ Tid</span><span class="u-val">${fmtTime(d.time)}</span></div>
+            <div class="u-row"><span class="u-lbl">⚡ Energi</span><span class="u-val">${fmtEnergy(d.energy)}</span></div>
+            <div class="u-row"><span class="u-lbl">💰 Pris</span><span class="u-val">${fmtCost(d.cost)}</span></div>
+            ${fsFmt ? `<div class="u-row u-ms"><span class="u-lbl" style="color:#8b5cf6">🖥️ Skærm</span><span class="u-val" style="color:#8b5cf6">${fsFmt}</span></div>` : ""}
           </div>
         </div>`;
     }).join("");
@@ -686,6 +738,7 @@ class PcUserStatisticsTabletCard extends HTMLElement {
           padding: 3px 0; border-bottom: 1px solid var(--div); font-size: 12px;
         }
         .u-row:last-child { border-bottom: none; }
+        .u-ms { background: rgba(139,92,246,0.07); border-radius: 4px; padding-left: 3px; margin-top: 2px; }
         .u-lbl { color: var(--sub); }
         .u-val  { font-weight: 600; }
 

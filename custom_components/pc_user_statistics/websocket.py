@@ -1,7 +1,14 @@
 # File Name: websocket.py
-# Version: 2.5.0
+# Version: 3.0.0
 # Description: WebSocket API for the PC User Statistics panel.
-# Last Updated: March 7, 2026
+# Last Updated: June 5, 2026
+#
+# Changes in 3.0.0:
+#   NEW: ws_get_family_safety command — reads Microsoft Family Safety
+#        entities (screen_time, balance, account_info, pending_requests)
+#        directly from HA states and returns structured data per user.
+#   NEW: get_config / save_config extended with family_safety_mappings
+#        (user_id → FS entity prefix, stored in config entry data).
 
 import logging
 import voluptuous as vol
@@ -17,6 +24,9 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     """Register all WebSocket commands for the panel."""
     websocket_api.async_register_command(hass, ws_get_stats)
     websocket_api.async_register_command(hass, ws_get_system)
+    websocket_api.async_register_command(hass, ws_get_health)
+    websocket_api.async_register_command(hass, ws_get_family_safety)
+    websocket_api.async_register_command(hass, ws_save_family_safety)
     websocket_api.async_register_command(hass, ws_get_notifications)
     websocket_api.async_register_command(hass, ws_save_notification)
     websocket_api.async_register_command(hass, ws_delete_notification)
@@ -26,7 +36,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_history)
     websocket_api.async_register_command(hass, ws_get_config)
     websocket_api.async_register_command(hass, ws_save_config)
-    _LOGGER.info("PC User Statistics WebSocket API registered (11 commands)")
+    _LOGGER.info("PC User Statistics WebSocket API registered (14 commands)")
 
 
 def _get_coordinator(hass):
@@ -81,7 +91,7 @@ def ws_get_system(hass, connection, msg):
     if not coordinator:
         connection.send_error(msg["id"], "not_ready", "Integration not ready"); return
     try:
-        cfg = coordinator.config if isinstance(coordinator.config, dict) else {}
+        cfg = dict(coordinator.config) if coordinator.config else {}
         import time as _time
         now = _time.time()
         try:
@@ -120,6 +130,151 @@ def ws_get_system(hass, connection, msg):
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
+
+
+@websocket_api.websocket_command({"type": f"{DOMAIN}/get_health"})
+@callback
+def ws_get_health(hass, connection, msg):
+    """Return detailed health/state data for the Admin tab health widget."""
+    coordinator = _get_coordinator(hass)
+    store = _get_store(hass)
+    if not coordinator:
+        connection.send_error(msg["id"], "not_ready", "Integration not ready")
+        return
+    try:
+        import time as _time
+        now = _time.time()
+
+        # ── Session snapshot info ──────────────────────────────────────────────
+        snapshot_age_s = None
+        snapshot_user = None
+        snapshot_acc_time = None
+        if store:
+            snap = store.get_session()
+            if snap:
+                snapshot_age_s = int(now - snap.get("saved_at", now))
+                snapshot_user = snap.get("current_user")
+                snapshot_acc_time = snap.get("acc_time", 0.0)
+
+        # ── Periodic flush info ───────────────────────────────────────────────
+        last_flush = getattr(coordinator, "_last_session_flush", 0.0)
+        flush_age_s = int(now - last_flush) if last_flush > 0 else None
+
+        # ── InfluxDB write info ───────────────────────────────────────────────
+        last_write = float(getattr(coordinator, "last_write_time", 0.0) or 0)
+        write_age_s = int(now - last_write) if last_write > 0 else None
+        consec_failures = getattr(coordinator, "_consecutive_write_failures", 0)
+
+        connection.send_result(msg["id"], {
+            # Session
+            "current_user":      coordinator.current_user,
+            "acc_time":          coordinator.acc_time,
+            "snapshot_age_s":    snapshot_age_s,
+            "snapshot_user":     snapshot_user,
+            "snapshot_acc_time": snapshot_acc_time,
+            # Flush
+            "last_flush_age_s":  flush_age_s,
+            # InfluxDB
+            "write_age_s":       write_age_s,
+            "buffer_size":       len(coordinator.failed_writes),
+            "buffer_max":        100,
+            "consec_failures":   consec_failures,
+            # Monthly data
+            "monthly_loaded":    coordinator._monthly_loaded,
+        })
+    except Exception as err:
+        connection.send_error(msg["id"], "unknown_error", str(err))
+
+
+@websocket_api.websocket_command({"type": f"{DOMAIN}/get_family_safety"})
+@callback
+def ws_get_family_safety(hass, connection, msg):
+    """Return Microsoft Family Safety data for all configured users.
+
+    Reads HA sensor states directly — no extra InfluxDB queries needed.
+    Returns screen_time (minutes today), balance (DKK), account info,
+    and pending requests count per user.
+    """
+    coordinator = _get_coordinator(hass)
+    if not coordinator:
+        connection.send_error(msg["id"], "not_ready", "Integration not ready")
+        return
+    try:
+        entry = coordinator.config_entry
+        from .const import CONF_FAMILY_SAFETY_MAPPINGS
+        fs_mappings: dict = entry.data.get(CONF_FAMILY_SAFETY_MAPPINGS, {})
+
+        result: dict = {}
+        for user_id, prefix in fs_mappings.items():
+            if not prefix:
+                continue
+            p = prefix.rstrip("_")
+
+            def _state(suffix, _p=p):
+                s = hass.states.get(f"sensor.{_p}_{suffix}")
+                if s is None or s.state in ("unavailable", "unknown", "none", ""):
+                    return None
+                return s.state
+
+            def _attr(suffix, attr, _p=p):
+                s = hass.states.get(f"sensor.{_p}_{suffix}")
+                return s.attributes.get(attr) if s else None
+
+            st_state = _state("screen_time")
+            result[user_id] = {
+                "user_id":          user_id,
+                "prefix":           prefix,
+                "screen_time_min":  int(st_state) if st_state is not None else None,
+                "screen_time_secs": _attr("screen_time", "total_seconds"),
+                "screen_time_date": _attr("screen_time", "date"),
+                "screen_time_fmt":  _attr("screen_time", "formatted_time"),
+                "balance_dkk":      float(_state("balance")) if _state("balance") is not None else None,
+                "account_name":     _state("account_info"),
+                "device_count":     _attr("account_info", "device_count"),
+                "app_count":        _attr("account_info", "application_count"),
+                "profile_picture":  _attr("account_info", "profile_picture"),
+                "pending_count":    int(_state("pending_requests")) if _state("pending_requests") is not None else None,
+                "pending_requests": _attr("pending_requests", "requests") or [],
+            }
+
+        connection.send_result(msg["id"], {
+            "users":    result,
+            "mappings": fs_mappings,
+        })
+    except Exception as err:
+        _LOGGER.exception("Error reading Family Safety data: %s", err)
+        connection.send_error(msg["id"], "unknown_error", str(err))
+
+
+@websocket_api.websocket_command(vol.All(vol.Schema({vol.Required("type"): f"{DOMAIN}/save_family_safety", vol.Optional("family_safety_mappings"): dict}, extra=vol.ALLOW_EXTRA)))
+@websocket_api.async_response
+async def ws_save_family_safety(hass, connection, msg):
+    """Save family safety mappings separately — avoids voluptuous extra-key rejection.
+
+    Receives the full message dict and extracts mappings manually so voluptuous
+    never sees the arbitrary user-keyed dict.
+    """
+    coordinator = _get_coordinator(hass)
+    if not coordinator:
+        connection.send_error(msg["id"], "not_ready", "Integration not ready")
+        return
+    try:
+        from .const import CONF_FAMILY_SAFETY_MAPPINGS
+        # Read raw mappings directly from msg — bypasses voluptuous schema
+        raw = msg.get("family_safety_mappings", {})
+        if not isinstance(raw, dict):
+            connection.send_error(msg["id"], "invalid_input", "family_safety_mappings must be a dict")
+            return
+        clean = {str(k): str(v) for k, v in raw.items() if k}
+        entry = coordinator.config_entry
+        new_data = {**entry.data, CONF_FAMILY_SAFETY_MAPPINGS: clean}
+        hass.config_entries.async_update_entry(entry, data=new_data)
+        _LOGGER.info("Family Safety mappings saved: %s", list(clean.keys()))
+        connection.send_result(msg["id"], {"success": True, "mappings": clean})
+    except Exception as err:
+        _LOGGER.exception("Error saving Family Safety mappings: %s", err)
+        connection.send_error(msg["id"], "unknown_error", str(err))
+
 
 
 @websocket_api.websocket_command({"type": f"{DOMAIN}/get_notifications"})
@@ -359,6 +514,7 @@ def ws_get_config(hass, connection, msg):
             "gauge5_max":           entry.data.get("gauge5_max", ""),
             "user_mappings":  entry.options.get("user_mappings", coordinator.user_map),
             "tracked_users":  coordinator.tracked_users,
+            "family_safety_mappings": entry.data.get("family_safety_mappings", {}),
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
@@ -423,6 +579,14 @@ async def ws_save_config(hass, connection, msg):
                       "gauge5_entity", "gauge5_label", "gauge5_max"):
             if field in msg:
                 new_data[field] = msg[field].strip()
+
+        # Family Safety mappings — validated manually, not via voluptuous
+        # (voluptuous does not allow arbitrary string keys in nested dicts)
+        raw_fs = msg.get("family_safety_mappings")
+        if isinstance(raw_fs, dict):
+            new_data["family_safety_mappings"] = {
+                str(k): str(v) for k, v in raw_fs.items() if k
+            }
 
         hass.config_entries.async_update_entry(entry, data=new_data, options=new_options)
 

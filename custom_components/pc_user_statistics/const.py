@@ -1,13 +1,13 @@
 # File Name: const.py
-# Version: 2.7.2
+# Version: 3.0.0
 # Description: Constants for the PC User Statistics integration.
-# Last Updated: March 16, 2026
+# Last Updated: June 5, 2026
 
 from typing import Final
 
 # Integration metadata
 DOMAIN: Final = "pc_user_statistics"
-__version__: Final = "2.7.4"
+__version__: Final = "2.9.0"
 
 # Device identifiers
 HUB_DEVICE_ID: Final = "statistics_hub"
@@ -24,6 +24,7 @@ PRICE_ENTITY: Final = "sensor.energi_data_service"
 # Config entry keys for user configuration
 CONF_USER_MAPPINGS: Final = "user_mappings"
 CONF_TRACKED_USERS: Final = "tracked_users"
+CONF_FAMILY_SAFETY_MAPPINGS: Final = "family_safety_mappings"  # user_id → FS entity prefix
 
 # Default user mappings (sensor state → user ID)
 DEFAULT_USER_MAP: Final = {

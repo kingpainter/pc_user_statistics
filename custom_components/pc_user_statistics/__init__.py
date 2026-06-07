@@ -1,7 +1,27 @@
 # File Name: __init__.py
-# Version: 2.7.4
+# Version: 2.9.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: May 15, 2026
+# Last Updated: June 5, 2026
+#
+# Changes in 2.9.0:
+#   NEW: Microsoft Family Safety gap-fill on HA restart.
+#        At shutdown, MS screen_time (minutes) and date are saved to the session
+#        snapshot. At startup, _async_restore_session() reads the current MS
+#        screen_time and adds the delta to acc_time — recovering time lost while
+#        HA was down. Only applies to users with a Family Safety mapping.
+#        Capped at 4 hours delta to guard against sensor anomalies.
+#        New helper: _read_ms_screen_time(user) — reads sensor.{prefix}_screen_time.
+#
+# Changes in 2.8.0:
+#   NEW: Periodic session flush every 60s via async_call_later, independent of
+#        InfluxDB writes. Fixes data loss when InfluxDB is down across multiple
+#        consecutive HA restarts — session state is now always persisted to disk
+#        regardless of InfluxDB availability.
+#   NEW: ws_get_health WebSocket command exposes session snapshot age, flush
+#        timestamp, and buffer state for the health widget in the panel Admin tab.
+#   NEW: store.py split into two storage keys: pc_user_statistics.config for
+#        notification rules/devices, and pc_user_statistics.session for session
+#        state. Isolates corruption between the two concerns.
 #
 # Changes in 2.7.4:
 #   FIX: last_write_time initialised to 0.0 instead of time.time().
@@ -73,6 +93,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_state_change_event
+from homeassistant.helpers.event import async_call_later
 
 from .const import (
     DOMAIN,
@@ -162,6 +183,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Restore persisted session — called here with store directly to avoid
         # timing dependency on hass.data population order.
         await coordinator._async_restore_session(store)
+
+        # Start periodic session flush — ensures session reaches disk every 60s
+        # regardless of InfluxDB availability.
+        coordinator._schedule_session_flush()
 
         # Read the current user sensor state at startup.
         # async_track_state_change_event only fires on *future* changes — if HA restarts
@@ -326,6 +351,11 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # Used by idle_pc notification rule as the correct idle duration source.
         self._idle_since: float | None = None
 
+        # Timestamp of last session flush to disk (independent of InfluxDB writes)
+        self._last_session_flush: float = 0.0
+        # Cancel callback for the periodic session flush timer
+        self._session_flush_cancel = None
+
         # Load monthly data in the background — does NOT block coordinator init
         hass.async_create_task(self._async_load_monthly_data())
         # _async_restore_session is called explicitly from async_setup_entry
@@ -361,12 +391,109 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 f"Cannot connect to InfluxDB at {self._influx_base_url}: {err}"
             ) from err
 
+    def _read_ms_screen_time(self, user: str) -> tuple[int | None, str | None]:
+        """Read Microsoft Family Safety screen_time for a user from HA states.
+
+        Returns (minutes: int | None, date: str | None).
+        Returns (None, None) if no Family Safety mapping exists for the user
+        or if the sensor is unavailable.
+        """
+        from .const import CONF_FAMILY_SAFETY_MAPPINGS
+        fs_mappings: dict = self.config_entry.data.get(CONF_FAMILY_SAFETY_MAPPINGS, {})
+        prefix = fs_mappings.get(user)
+        if not prefix:
+            return None, None
+        p = prefix.rstrip("_")
+        state = self.hass.states.get(f"sensor.{p}_screen_time")
+        if state is None or state.state in ("unavailable", "unknown", "none", ""):
+            return None, None
+        try:
+            minutes = int(state.state)
+            date = state.attributes.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            return minutes, str(date)
+        except (ValueError, TypeError):
+            return None, None
+
     async def async_shutdown(self) -> None:
         """Close the persistent HTTP session. Called on integration unload."""
         self._unloaded = True  # Stop any pending background retry tasks
+        # Cancel the periodic session flush timer so it does not fire after unload
+        if self._session_flush_cancel is not None:
+            self._session_flush_cancel()
+            self._session_flush_cancel = None
+        # Snapshot Microsoft screen_time before shutdown so _async_restore_session
+        # can compute the gap delta on next startup.
+        if self.current_user:
+            _store = self.hass.data.get(DOMAIN, {}).get("store")
+            if _store and _store.get_session():
+                ms_min, ms_date = self._read_ms_screen_time(self.current_user)
+                if ms_min is not None:
+                    _store.save_session_in_memory(
+                        self.current_user,
+                        self.acc_time,
+                        self.acc_energy,
+                        self.acc_cost,
+                        time.time(),
+                        ms_screen_time=ms_min,
+                        ms_screen_time_date=ms_date,
+                    )
+                    # await directly — async_create_task is unreliable during shutdown
+                    await _store.async_flush_session()
+                    _LOGGER.debug(
+                        "Shutdown: saved MS screen_time=%d min (%s) for gap-fill on next startup",
+                        ms_min, ms_date,
+                    )
         if not self._http_session.closed:
             await self._http_session.close()
             _LOGGER.debug("InfluxDB HTTP session closed")
+
+    def _schedule_session_flush(self) -> None:
+        """Schedule a periodic session flush every 60s, independent of InfluxDB.
+
+        This guarantees that session state reaches disk even when InfluxDB is
+        unavailable — fixing data loss across consecutive HA restarts where no
+        InfluxDB writes (and thus no session flushes) occur.
+        """
+        if self._unloaded:
+            return
+        if self._session_flush_cancel is not None:
+            self._session_flush_cancel()
+
+        @callback
+        def _flush_callback(now):
+            """Fire async session flush and reschedule."""
+            if self._unloaded:
+                return
+            self.hass.async_create_task(self._async_periodic_flush())
+
+        self._session_flush_cancel = async_call_later(self.hass, 60, _flush_callback)
+
+    async def _async_periodic_flush(self) -> None:
+        """Flush session snapshot to disk and reschedule next flush."""
+        if self._unloaded or not self.current_user:
+            # Reschedule even if no active user — ensures we pick up next login
+            self._schedule_session_flush()
+            return
+        _store = self.hass.data.get(DOMAIN, {}).get("store")
+        if _store:
+            # Include MS screen_time so gap-fill works even after unclean shutdown
+            ms_min, ms_date = self._read_ms_screen_time(self.current_user)
+            _store.save_session_in_memory(
+                self.current_user,
+                self.acc_time,
+                self.acc_energy,
+                self.acc_cost,
+                time.time(),
+                ms_screen_time=ms_min,
+                ms_screen_time_date=ms_date,
+            )
+            await _store.async_flush_session()
+            self._last_session_flush = time.time()
+            _LOGGER.debug(
+                "Periodic session flush — user='%s' acc_time=%.0fs ms_screen_time=%s",
+                self.current_user, self.acc_time, ms_min,
+            )
+        self._schedule_session_flush()
 
     # ── InfluxDB helpers ───────────────────────────────────────────────────
 
@@ -506,6 +633,46 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.acc_cost     = snapshot.get("acc_cost",   0.0)
         self.last_time       = now
         self.last_write_time = now
+
+        # ── Microsoft Family Safety gap-fill ──────────────────────────────
+        # If we have a MS screen_time reading from shutdown, compare it with
+        # the current MS screen_time. The delta is time that passed while HA
+        # was down — add it to acc_time so the gap is recovered.
+        saved_ms_min: int | None  = snapshot.get("ms_screen_time")
+        saved_ms_date: str | None = snapshot.get("ms_screen_time_date")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        if saved_ms_min is not None and saved_ms_date == today and saved_user:
+            current_ms_min, current_ms_date = self._read_ms_screen_time(saved_user)
+            if current_ms_min is not None and current_ms_date == today:
+                delta_min = current_ms_min - saved_ms_min
+                if 0 < delta_min <= 240:  # sanity cap: max 4 hours gap
+                    delta_s = float(delta_min * 60)
+                    self.acc_time += delta_s
+                    _LOGGER.info(
+                        "MS gap-fill for '%s': +%d min (MS was %d → now %d) — acc_time now %.0fs",
+                        saved_user, delta_min, saved_ms_min, current_ms_min, self.acc_time,
+                    )
+                elif delta_min > 240:
+                    _LOGGER.warning(
+                        "MS gap-fill for '%s': delta %d min exceeds 4h cap — skipping",
+                        saved_user, delta_min,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "MS gap-fill for '%s': delta %d min (≤0) — nothing to add",
+                        saved_user, delta_min,
+                    )
+            else:
+                _LOGGER.debug(
+                    "MS gap-fill for '%s': current MS data unavailable or date mismatch — skipping",
+                    saved_user,
+                )
+        else:
+            _LOGGER.debug(
+                "MS gap-fill: no saved MS data, or date mismatch (saved=%s, today=%s) — skipping",
+                saved_ms_date, today,
+            )
 
         _LOGGER.info(
             "Session restored after HA restart — user='%s' acc_time=%.0fs "
@@ -726,12 +893,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             self._consecutive_write_failures = 0
             _store = self.hass.data.get(DOMAIN, {}).get("store")
             if _store:
+                ms_min, ms_date = self._read_ms_screen_time(self.current_user)
                 _store.save_session_in_memory(
                     self.current_user,
                     self.acc_time,
                     self.acc_energy,
                     self.acc_cost,
                     time.time(),
+                    ms_screen_time=ms_min,
+                    ms_screen_time_date=ms_date,
                 )
                 self.hass.async_create_task(_store.async_flush_session())
         else:
@@ -740,12 +910,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             self._buffer_failed_write({"point": point, "timestamp": timestamp_ns, "attempts": 1})
             _store = self.hass.data.get(DOMAIN, {}).get("store")
             if _store:
+                ms_min, ms_date = self._read_ms_screen_time(self.current_user)
                 _store.save_session_in_memory(
                     self.current_user,
                     self.acc_time,
                     self.acc_energy,
                     self.acc_cost,
                     time.time(),
+                    ms_screen_time=ms_min,
+                    ms_screen_time_date=ms_date,
                 )
                 self.hass.async_create_task(_store.async_flush_session())
 
