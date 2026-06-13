@@ -159,6 +159,27 @@ def _normalize_user_map(raw: dict) -> dict[str, str]:
     return normalized
 
 
+def _assert_string_user_map(user_map: dict[str, str]) -> dict[str, str]:
+    """Fix 4: defensive last-line check that user_map values are plain strings.
+
+    _normalize_user_map() should already guarantee this, but fails loudly and
+    early if it doesn't — downstream code (_handle_user_change) assumes plain
+    strings and would otherwise have to re-implement this normalization on the
+    fly for dict values that slipped through.
+
+    Returns user_map unchanged if all values are strings, otherwise logs an
+    error and returns a copy with the offending entries removed.
+    """
+    non_strings = {k: v for k, v in user_map.items() if not isinstance(v, str)}
+    if not non_strings:
+        return user_map
+    _LOGGER.error(
+        "user_map contains non-string values after normalization — "
+        "these entries will be ignored: %s", non_strings,
+    )
+    return {k: v for k, v in user_map.items() if isinstance(v, str)}
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PC User Statistics from a config entry."""
     _LOGGER.info("Setting up PC User Statistics integration (entry: %s)", entry.entry_id)
@@ -302,19 +323,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         # ── User configuration ─────────────────────────────────────────────
         raw_map = config_entry.options.get(CONF_USER_MAPPINGS, dict(DEFAULT_USER_MAP))
-        self.user_map: dict[str, str] = _normalize_user_map(raw_map)
-
-        # Fix 4: defensive assertion — _normalize_user_map() should already
-        # guarantee plain-string values, but fail loudly and early if it
-        # doesn't. Downstream code (_handle_user_change) assumes plain strings
-        # and would otherwise re-implement this normalization on the fly.
-        non_strings = {k: v for k, v in self.user_map.items() if not isinstance(v, str)}
-        if non_strings:
-            _LOGGER.error(
-                "user_map contains non-string values after normalization — "
-                "these entries will be ignored: %s", non_strings,
-            )
-            self.user_map = {k: v for k, v in self.user_map.items() if isinstance(v, str)}
+        self.user_map: dict[str, str] = _assert_string_user_map(_normalize_user_map(raw_map))
 
         self.tracked_users: list[str] = config_entry.options.get(
             CONF_TRACKED_USERS, list(DEFAULT_USERS)
