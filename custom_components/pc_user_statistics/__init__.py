@@ -1,7 +1,19 @@
 # File Name: __init__.py
-# Version: 2.9.0
+# Version: 2.10.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: June 5, 2026
+# Last Updated: June 13, 2026
+#
+# Changes in 2.10.0:
+#   FIX 1A: entry.runtime_data = coordinator now set in async_setup_entry,
+#        right after first refresh. Used by websocket._get_coordinator()
+#        (Fix 1B) instead of duck-typing on hass.data[DOMAIN].
+#   FIX 2: _schedule_session_flush() now has a liveness guard — if the
+#        previous periodic flush is >90s overdue while a session is active,
+#        a warning is logged. New field _last_flush_monotonic tracks this.
+#   FIX 4: Defensive assertion after _normalize_user_map() in __init__ —
+#        any remaining non-string user_map values are logged as an error
+#        and dropped, instead of silently being re-normalized later in
+#        _handle_user_change().
 #
 # Changes in 2.9.0:
 #   NEW: Microsoft Family Safety gap-fill on HA restart.
@@ -164,6 +176,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         await coordinator.async_config_entry_first_refresh()
 
+        # Fix 1A: expose coordinator via entry.runtime_data — the modern HA
+        # pattern. websocket._get_coordinator() reads this directly instead of
+        # iterating hass.data[DOMAIN] and duck-typing on tracked_users.
+        entry.runtime_data = coordinator
+
         notification_manager = NotificationManager(hass, store)
 
         hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
@@ -286,6 +303,19 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # ── User configuration ─────────────────────────────────────────────
         raw_map = config_entry.options.get(CONF_USER_MAPPINGS, dict(DEFAULT_USER_MAP))
         self.user_map: dict[str, str] = _normalize_user_map(raw_map)
+
+        # Fix 4: defensive assertion — _normalize_user_map() should already
+        # guarantee plain-string values, but fail loudly and early if it
+        # doesn't. Downstream code (_handle_user_change) assumes plain strings
+        # and would otherwise re-implement this normalization on the fly.
+        non_strings = {k: v for k, v in self.user_map.items() if not isinstance(v, str)}
+        if non_strings:
+            _LOGGER.error(
+                "user_map contains non-string values after normalization — "
+                "these entries will be ignored: %s", non_strings,
+            )
+            self.user_map = {k: v for k, v in self.user_map.items() if isinstance(v, str)}
+
         self.tracked_users: list[str] = config_entry.options.get(
             CONF_TRACKED_USERS, list(DEFAULT_USERS)
         )
@@ -353,6 +383,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         # Timestamp of last session flush to disk (independent of InfluxDB writes)
         self._last_session_flush: float = 0.0
+        # Monotonic timestamp of last flush — used by the Fix 2 liveness guard.
+        # (monotonic, unlike time.time(), can't jump backwards on clock changes)
+        self._last_flush_monotonic: float = 0.0
         # Cancel callback for the periodic session flush timer
         self._session_flush_cancel = None
 
@@ -453,9 +486,25 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         This guarantees that session state reaches disk even when InfluxDB is
         unavailable — fixing data loss across consecutive HA restarts where no
         InfluxDB writes (and thus no session flushes) occur.
+
+        Fix 2 — liveness guard: if the previous flush is significantly overdue
+        while a session is active, log a warning. A crashed/cancelled timer
+        would otherwise fail silently and cause quiet session data loss.
         """
         if self._unloaded:
             return
+
+        now_mono = time.monotonic()
+        if (
+            self._last_flush_monotonic > 0
+            and (now_mono - self._last_flush_monotonic) > 90
+            and self.current_user is not None
+        ):
+            _LOGGER.warning(
+                "Session flush timer overdue (%.0fs since last flush) — rescheduling",
+                now_mono - self._last_flush_monotonic,
+            )
+
         if self._session_flush_cancel is not None:
             self._session_flush_cancel()
 
@@ -489,6 +538,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             )
             await _store.async_flush_session()
             self._last_session_flush = time.time()
+            self._last_flush_monotonic = time.monotonic()
             _LOGGER.debug(
                 "Periodic session flush — user='%s' acc_time=%.0fs ms_screen_time=%s",
                 self.current_user, self.acc_time, ms_min,

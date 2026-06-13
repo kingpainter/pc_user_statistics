@@ -1,7 +1,16 @@
 # File Name: websocket.py
-# Version: 3.0.0
+# Version: 3.1.0
 # Description: WebSocket API for the PC User Statistics panel.
-# Last Updated: June 5, 2026
+# Last Updated: June 13, 2026
+#
+# Changes in 3.1.0:
+#   FIX 1B: _get_coordinator() now reads entry.runtime_data via
+#        hass.config_entries.async_entries(DOMAIN) instead of duck-typing
+#        on hass.data[DOMAIN].values(). Requires Fix 1A in __init__.py
+#        (entry.runtime_data = coordinator).
+#   FIX 3: ws_get_health now exposes flush_timer_active and flush_interval_s
+#        so the Admin tab can show a green/red "periodisk backup aktiv"
+#        indicator.
 #
 # Changes in 3.0.0:
 #   NEW: ws_get_family_safety command — reads Microsoft Family Safety
@@ -40,13 +49,16 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
 
 
 def _get_coordinator(hass):
-    for value in hass.data.get(DOMAIN, {}).values():
-        try:
-            users = value.tracked_users
-            if isinstance(users, list):
-                return value
-        except AttributeError:
-            continue
+    """Return the active PCStatisticsCoordinator via entry.runtime_data.
+
+    Fix 1B: previously iterated hass.data[DOMAIN].values() and duck-typed on
+    tracked_users to find the coordinator — fragile and not aligned with
+    modern HA practice. entry.runtime_data is set in async_setup_entry
+    (Fix 1A) right after the coordinator is ready.
+    """
+    for entry in hass.config_entries.async_entries(DOMAIN):
+        if getattr(entry, "runtime_data", None) is not None:
+            return entry.runtime_data
     return None
 
 def _get_store(hass):
@@ -174,6 +186,8 @@ def ws_get_health(hass, connection, msg):
             "snapshot_acc_time": snapshot_acc_time,
             # Flush
             "last_flush_age_s":  flush_age_s,
+            "flush_timer_active": coordinator._session_flush_cancel is not None,
+            "flush_interval_s":   60,
             # InfluxDB
             "write_age_s":       write_age_s,
             "buffer_size":       len(coordinator.failed_writes),

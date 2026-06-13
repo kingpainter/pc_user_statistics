@@ -1,6 +1,6 @@
 # PC User Statistics
 
-[![Version](https://img.shields.io/badge/version-2.6.1-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
+[![Version](https://img.shields.io/badge/version-2.10.0-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue.svg)](https://www.home-assistant.io/)
 [![Quality Scale](https://img.shields.io/badge/quality-silver%20→%20gold-gold.svg)](https://developers.home-assistant.io/docs/integration_quality_scale_index/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)

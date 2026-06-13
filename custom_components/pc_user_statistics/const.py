@@ -1,13 +1,13 @@
 # File Name: const.py
-# Version: 3.0.0
+# Version: 2.10.0
 # Description: Constants for the PC User Statistics integration.
-# Last Updated: June 5, 2026
+# Last Updated: June 13, 2026
 
 from typing import Final
 
 # Integration metadata
 DOMAIN: Final = "pc_user_statistics"
-__version__: Final = "2.9.0"
+__version__: Final = "2.10.0"
 
 # Device identifiers
 HUB_DEVICE_ID: Final = "statistics_hub"

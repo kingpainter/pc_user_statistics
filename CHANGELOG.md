@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [2.10.0] - 2026-06-13
+
+### Fixed
+
+- **`websocket.py` — `_get_coordinator()` brugte skrøbelig duck-typing** (Fix 1):
+  - Iterede tidligere over `hass.data[DOMAIN].values()` og tjekkede `hasattr(value, "tracked_users")` for at finde coordinator'en
+  - Nu sættes `entry.runtime_data = coordinator` i `async_setup_entry` (`__init__.py`), og `_get_coordinator()` slår op via `hass.config_entries.async_entries(DOMAIN)` — moderne HA-mønster, robust mod ekstra nøgler i `hass.data[DOMAIN]`
+
+- **`__init__.py` — `user_map` kunne stadig indeholde dict-værdier efter normalisering** (Fix 4):
+  - `_normalize_user_map()` normaliserer allerede til plain strings, men der var ingen kontrol af om det reelt skete
+  - Ny defensiv assertion i `__init__`: ikke-string værdier logges som fejl og fjernes fra `user_map`, så `_handle_user_change()` ikke længere skal håndtere dicts on-the-fly
+
+### Added
+
+- **`__init__.py` — Livsguard for periodisk session-flush** (Fix 2):
+  - `_schedule_session_flush()` logger nu en advarsel hvis forrige flush er >90s forsinket mens en session er aktiv — gør en "stille død" flush-timer synlig i loggen
+  - Ny `_last_flush_monotonic`-tracking (monotonic clock, robust mod systemur-ændringer)
+
+- **`websocket.py` — `ws_get_health` eksponerer flush-timer status** (Fix 3):
+  - Nye felter `flush_timer_active` og `flush_interval_s` i svaret
+  - Giver Admin-tab mulighed for at vise grøn/rød indikator for "periodisk backup aktiv"
+
+
 ## [2.7.0] - 2026-03-14
 
 ### Added
