@@ -1044,6 +1044,41 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             len(self.failed_writes), MAX_BUFFERED_WRITES,
         )
 
+    async def async_add_manual_entry(
+        self,
+        user: str,
+        timestamp_ns: int,
+        time_delta: float,
+        energy_delta: float = 0.0,
+        cost_delta: float = 0.0,
+    ) -> bool:
+        """Write a manual time/energy/cost correction point to InfluxDB.
+
+        Used by ws_add_manual_entry for ad-hoc fixes when a session was lost
+        (e.g. files were overwritten mid-session, causing data loss). Tagged
+        source=manual so corrections remain distinguishable from normal
+        tracking points in InfluxDB.
+
+        If the write succeeds and monthly data is already loaded, reload it
+        immediately so the correction is reflected in the panel without
+        waiting for the next poll or a full integration reload.
+        """
+        point = (
+            f"{MEASUREMENT},user={user},source=manual "
+            f"power=0,time_delta={time_delta},"
+            f"energy_delta={energy_delta},cost_delta={cost_delta} "
+            f"{timestamp_ns}"
+        )
+        success = await self._write_point_to_influx(point)
+        if success:
+            _LOGGER.info(
+                "Manual correction written: user=%s time=+%.0fs energy=+%.4fkWh cost=+%.4fDKK",
+                user, time_delta, energy_delta, cost_delta,
+            )
+            if self._monthly_loaded:
+                await self._async_load_monthly_data()
+        return success
+
     async def _retry_failed_writes(self) -> None:
         """Retry buffered failed writes. Drops after max attempts."""
         _LOGGER.info("Retrying %d buffered write(s)", len(self.failed_writes))

@@ -20,6 +20,7 @@
 #        (user_id → FS entity prefix, stored in config entry data).
 
 import logging
+from datetime import datetime, timezone
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.components import websocket_api
@@ -45,7 +46,8 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_get_history)
     websocket_api.async_register_command(hass, ws_get_config)
     websocket_api.async_register_command(hass, ws_save_config)
-    _LOGGER.info("PC User Statistics WebSocket API registered (14 commands)")
+    websocket_api.async_register_command(hass, ws_add_manual_entry)
+    _LOGGER.info("PC User Statistics WebSocket API registered (15 commands)")
 
 
 def _get_coordinator(hass):
@@ -389,6 +391,64 @@ async def ws_save_devices(hass, connection, msg):
         await store.async_save_devices(msg["devices"])
         connection.send_result(msg["id"], {"success": True})
     except Exception as err:
+        connection.send_error(msg["id"], "unknown_error", str(err))
+
+
+# ── Manual correction ─────────────────────────────────────────────────
+
+@websocket_api.websocket_command({
+    "type": f"{DOMAIN}/add_manual_entry",
+    vol.Required("user"): str,
+    vol.Required("date"): str,
+    vol.Required("time_minutes"): vol.Coerce(float),
+    vol.Optional("energy_kwh", default=0.0): vol.Coerce(float),
+    vol.Optional("cost_dkk", default=0.0): vol.Coerce(float),
+})
+@websocket_api.async_response
+async def ws_add_manual_entry(hass, connection, msg):
+    """Add a manual time/energy/cost correction for a missed session.
+
+    Writes a single point to InfluxDB tagged source=manual via
+    coordinator.async_add_manual_entry(). Intended for rare cases where
+    automatic tracking lost a session (e.g. files overwritten mid-session).
+    """
+    coordinator = _get_coordinator(hass)
+    if not coordinator:
+        connection.send_error(msg["id"], "not_ready", "Integration not ready")
+        return
+    try:
+        user = msg["user"]
+        if user not in coordinator.tracked_users:
+            connection.send_error(msg["id"], "invalid_input", f"Unknown user: {user}")
+            return
+
+        time_minutes = msg["time_minutes"]
+        if time_minutes <= 0:
+            connection.send_error(msg["id"], "invalid_input", "time_minutes must be positive")
+            return
+
+        try:
+            day = datetime.strptime(msg["date"], "%Y-%m-%d").replace(hour=12, tzinfo=timezone.utc)
+        except ValueError:
+            connection.send_error(msg["id"], "invalid_input", "date must be YYYY-MM-DD")
+            return
+
+        timestamp_ns = int(day.timestamp() * 1_000_000_000)
+
+        success = await coordinator.async_add_manual_entry(
+            user=user,
+            timestamp_ns=timestamp_ns,
+            time_delta=time_minutes * 60,
+            energy_delta=msg.get("energy_kwh", 0.0),
+            cost_delta=msg.get("cost_dkk", 0.0),
+        )
+        if not success:
+            connection.send_error(msg["id"], "write_failed", "Could not write to InfluxDB")
+            return
+
+        connection.send_result(msg["id"], {"success": True})
+    except Exception as err:
+        _LOGGER.exception("Error adding manual entry: %s", err)
         connection.send_error(msg["id"], "unknown_error", str(err))
 
 
