@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [2.11.0] - 2026-06-13
+
+### Added
+
+- **Manuel korrektion til sjældne data-tab** (`__init__.py`, `websocket.py`, `pc-user-statistics-panel.js`):
+  - Ny coordinator-metode `async_add_manual_entry()` skriver et ekstra `pc_usage`-punkt til InfluxDB tagget `source=manual`, og genindlæser månedstotalerne med det samme
+  - Ny WS-kommando `pc_user_statistics/add_manual_entry` (15. kommando) — validerer bruger, dato (YYYY-MM-DD) og tid (minutter); energi (kWh) og pris (DKK) er valgfri
+  - Ny sektion "Manuel korrektion" på Admin-tab: formular til bruger, dato, tid, energi og pris, med succes-/fejl-banner
+  - Brugscase: en session der ikke blev registreret automatisk (f.eks. filer overskrevet midt i en session) kan nu rettes direkte i panelet i stedet for manuel InfluxDB line-protocol write
+
+
 ## [2.10.0] - 2026-06-13
 
 ### Fixed

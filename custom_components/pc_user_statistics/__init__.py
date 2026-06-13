@@ -1,7 +1,15 @@
 # File Name: __init__.py
-# Version: 2.10.0
+# Version: 2.11.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
 # Last Updated: June 13, 2026
+#
+# Changes in 2.11.0:
+#   NEW: async_add_manual_entry(user, timestamp_ns, time_delta, energy_delta,
+#        cost_delta) — writes a one-off InfluxDB point tagged source=manual
+#        for ad-hoc corrections when a session was lost (e.g. files were
+#        overwritten mid-session). Reloads monthly totals immediately after
+#        a successful write. Exposed via websocket.ws_add_manual_entry and a
+#        new "Manuel korrektion" form on the panel's Admin tab.
 #
 # Changes in 2.10.0:
 #   FIX 1A: entry.runtime_data = coordinator now set in async_setup_entry,

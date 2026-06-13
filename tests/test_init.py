@@ -389,3 +389,61 @@ class TestScheduleSessionFlushLivenessGuard:
 
         previous_cancel.assert_called_once()
         mock_call_later.assert_called_once()
+
+
+# ── async_add_manual_entry ───────────────────────────────────────────
+
+class TestAsyncAddManualEntry:
+    """Tests for coordinator.async_add_manual_entry (manual correction)."""
+
+    def _make_coord(self, monthly_loaded=True, write_success=True):
+        from custom_components.pc_user_statistics.__init__ import PCStatisticsCoordinator
+        coord = MagicMock()
+        coord._monthly_loaded = monthly_loaded
+        coord._write_point_to_influx = AsyncMock(return_value=write_success)
+        coord._async_load_monthly_data = AsyncMock()
+        coord.async_add_manual_entry = PCStatisticsCoordinator.async_add_manual_entry.__get__(coord)
+        return coord
+
+    @pytest.mark.asyncio
+    async def test_writes_point_tagged_manual(self):
+        coord = self._make_coord(monthly_loaded=True)
+        result = await coord.async_add_manual_entry(
+            user="lukas", timestamp_ns=1718280000000000000,
+            time_delta=27000, energy_delta=1.2375, cost_delta=1.3984,
+        )
+        assert result is True
+        coord._write_point_to_influx.assert_called_once()
+        point = coord._write_point_to_influx.call_args[0][0]
+        assert "user=lukas" in point
+        assert "source=manual" in point
+        assert "time_delta=27000" in point
+        assert "energy_delta=1.2375" in point
+        assert "cost_delta=1.3984" in point
+
+    @pytest.mark.asyncio
+    async def test_reloads_monthly_when_already_loaded(self):
+        coord = self._make_coord(monthly_loaded=True)
+        await coord.async_add_manual_entry("lukas", 123, 60)
+        coord._async_load_monthly_data.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_reload_monthly_when_not_loaded(self):
+        coord = self._make_coord(monthly_loaded=False)
+        await coord.async_add_manual_entry("lukas", 123, 60)
+        coord._async_load_monthly_data.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_returns_false_and_skips_reload_on_write_failure(self):
+        coord = self._make_coord(monthly_loaded=True, write_success=False)
+        result = await coord.async_add_manual_entry("lukas", 123, 60)
+        assert result is False
+        coord._async_load_monthly_data.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_default_energy_and_cost_are_zero(self):
+        coord = self._make_coord(monthly_loaded=True)
+        await coord.async_add_manual_entry("lukas", 123, 60)
+        point = coord._write_point_to_influx.call_args[0][0]
+        assert "energy_delta=0.0" in point
+        assert "cost_delta=0.0" in point

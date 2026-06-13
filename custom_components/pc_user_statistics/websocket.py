@@ -1,7 +1,13 @@
 # File Name: websocket.py
-# Version: 3.1.0
+# Version: 3.2.0
 # Description: WebSocket API for the PC User Statistics panel.
 # Last Updated: June 13, 2026
+#
+# Changes in 3.2.0:
+#   NEW: ws_add_manual_entry (pc_user_statistics/add_manual_entry) — lets the
+#        Admin tab add a one-off time/energy/cost correction for a missed
+#        session. Validates user/date/time_minutes, delegates the InfluxDB
+#        write to coordinator.async_add_manual_entry(). Now 15 commands.
 #
 # Changes in 3.1.0:
 #   FIX 1B: _get_coordinator() now reads entry.runtime_data via

@@ -16,8 +16,10 @@ from custom_components.pc_user_statistics.websocket import (
     ws_get_system,
     ws_get_notifications,
     ws_get_devices,
+    ws_add_manual_entry,
 )
 from custom_components.pc_user_statistics.const import DOMAIN
+from unittest.mock import AsyncMock
 
 
 # ── _get_coordinator ───────────────────────────────────────────────────────
@@ -238,3 +240,84 @@ class TestWsGetDevices:
         assert "devices" in result
         assert "available" in result
         assert result["devices"] == ["mobile_app_phone"]
+
+
+# ── ws_add_manual_entry ────────────────────────────────────────────
+
+class TestWsAddManualEntry:
+
+    def _make_env(self, write_success=True):
+        coord = MagicMock()
+        coord.tracked_users = ["flemming", "lukas", "sebastian"]
+        coord.async_add_manual_entry = AsyncMock(return_value=write_success)
+        hass = MagicMock()
+        entry = MagicMock()
+        entry.runtime_data = coord
+        hass.config_entries.async_entries.return_value = [entry]
+        connection = MagicMock()
+        return hass, connection, coord
+
+    @pytest.mark.asyncio
+    async def test_sends_error_when_no_coordinator(self):
+        hass = MagicMock()
+        hass.config_entries.async_entries.return_value = []
+        connection = MagicMock()
+        await ws_add_manual_entry(hass, connection, {
+            "id": 1, "user": "lukas", "date": "2026-06-13", "time_minutes": 450.0,
+        })
+        connection.send_error.assert_called_once()
+        assert connection.send_error.call_args[0][1] == "not_ready"
+
+    @pytest.mark.asyncio
+    async def test_rejects_unknown_user(self):
+        hass, connection, coord = self._make_env()
+        await ws_add_manual_entry(hass, connection, {
+            "id": 1, "user": "ukendt", "date": "2026-06-13", "time_minutes": 450.0,
+        })
+        connection.send_error.assert_called_once()
+        assert connection.send_error.call_args[0][1] == "invalid_input"
+        coord.async_add_manual_entry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_positive_time(self):
+        hass, connection, coord = self._make_env()
+        await ws_add_manual_entry(hass, connection, {
+            "id": 1, "user": "lukas", "date": "2026-06-13", "time_minutes": 0.0,
+        })
+        connection.send_error.assert_called_once()
+        assert connection.send_error.call_args[0][1] == "invalid_input"
+        coord.async_add_manual_entry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_date_format(self):
+        hass, connection, coord = self._make_env()
+        await ws_add_manual_entry(hass, connection, {
+            "id": 1, "user": "lukas", "date": "13-06-2026", "time_minutes": 450.0,
+        })
+        connection.send_error.assert_called_once()
+        assert connection.send_error.call_args[0][1] == "invalid_input"
+        coord.async_add_manual_entry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_success_sends_result(self):
+        hass, connection, coord = self._make_env(write_success=True)
+        await ws_add_manual_entry(hass, connection, {
+            "id": 1, "user": "lukas", "date": "2026-06-13",
+            "time_minutes": 450.0, "energy_kwh": 1.2375, "cost_dkk": 1.3984,
+        })
+        connection.send_result.assert_called_once_with(1, {"success": True})
+        coord.async_add_manual_entry.assert_called_once()
+        kwargs = coord.async_add_manual_entry.call_args.kwargs
+        assert kwargs["user"] == "lukas"
+        assert kwargs["time_delta"] == 450.0 * 60
+        assert kwargs["energy_delta"] == 1.2375
+        assert kwargs["cost_delta"] == 1.3984
+
+    @pytest.mark.asyncio
+    async def test_write_failure_sends_error(self):
+        hass, connection, coord = self._make_env(write_success=False)
+        await ws_add_manual_entry(hass, connection, {
+            "id": 1, "user": "lukas", "date": "2026-06-13", "time_minutes": 450.0,
+        })
+        connection.send_error.assert_called_once()
+        assert connection.send_error.call_args[0][1] == "write_failed"

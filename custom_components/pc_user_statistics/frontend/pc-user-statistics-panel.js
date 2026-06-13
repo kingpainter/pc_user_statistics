@@ -1,6 +1,14 @@
 // PC User Statistics Panel
-// Version: 3.0.0 — Vanilla JS (no imports)
-// Last Updated: June 5, 2026
+// Version: 3.1.0 — Vanilla JS (no imports)
+// Last Updated: June 13, 2026
+//
+// Changes in 3.1.0:
+//   NEW: Manual correction form on Admin tab — "Manuel korrektion".
+//        Lets the user add a one-off time/energy/cost entry for a missed
+//        session (e.g. files were overwritten mid-session and live tracking
+//        never registered it). Calls pc_user_statistics/add_manual_entry,
+//        which writes a source=manual InfluxDB point and reloads monthly
+//        totals immediately.
 //
 // Changes in 2.9.0 — UI/UX improvements:
 //   FIX: Tab labels always visible on desktop — only hidden on mobile (<600px)
@@ -47,6 +55,8 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._dragSrc     = null;
     this._haUsers     = [];
     this._fs          = null;  // Microsoft Family Safety data
+    this._manualSaving= false; // Admin tab: manual correction in progress
+    this._manualMsg   = null;  // Admin tab: manual correction result banner
   }
 
   set hass(h) {
@@ -254,6 +264,39 @@ class PcUserStatisticsPanel extends HTMLElement {
       this._notif.devices = devices;
     } catch(e) { console.error(e); }
     this._render();
+  }
+
+  // ── Manual correction (Admin tab) ───────────────────────────────
+  async _saveManualEntry() {
+    const root = this.shadowRoot;
+    const user   = root.getElementById("manual-user")?.value;
+    const date   = root.getElementById("manual-date")?.value;
+    const timeMin = parseFloat(root.getElementById("manual-time")?.value);
+    const energy  = parseFloat(root.getElementById("manual-energy")?.value) || 0;
+    const cost    = parseFloat(root.getElementById("manual-cost")?.value) || 0;
+
+    if (!user || !date || !timeMin || timeMin <= 0) {
+      this._manualMsg = { ok:false, text:"Udfyld bruger, dato og tid (minutter) f\u00f8r du gemmer." };
+      this._render();
+      return;
+    }
+
+    this._manualSaving = true; this._manualMsg = null; this._render();
+    try {
+      await this._hass.callWS({
+        type: "pc_user_statistics/add_manual_entry",
+        user, date,
+        time_minutes: timeMin,
+        energy_kwh: energy,
+        cost_dkk: cost,
+      });
+      this._manualMsg = { ok:true, text:`\u2705 Korrektion tilf\u00f8jet: ${user}, ${date}, ${timeMin} min.` };
+      // Refresh stats so the updated monthly total shows immediately
+      try { this._stats = await this._hass.callWS({ type:"pc_user_statistics/get_stats" }); } catch(e) {}
+    } catch(e) {
+      this._manualMsg = { ok:false, text:`\u274c Fejl: ${e.message||e}` };
+    }
+    this._manualSaving = false; this._render();
   }
 
   // ── Tab order ─────────────────────────────────────────────────
@@ -1482,6 +1525,41 @@ class PcUserStatisticsPanel extends HTMLElement {
         <div class="mapping-header"><span>Sensor tilstand</span><span>Bruger ID</span></div>
         ${mapRows}
       </div>
+      <div class="section-title">Manuel korrektion</div>
+      <div class="card" style="display:flex;flex-direction:column;gap:10px;padding:16px">
+        <div class="form-row">
+          <label>Bruger</label>
+          <select id="manual-user">
+            ${(sys.tracked_users||[]).map(u=>`<option value="${this._esc(u)}">${this._esc(u.charAt(0).toUpperCase()+u.slice(1))}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-row">
+          <label>Dato</label>
+          <input type="date" id="manual-date" value="${new Date().toISOString().slice(0,10)}">
+        </div>
+        <div class="form-row">
+          <label>Tid (min)</label>
+          <input type="number" id="manual-time" min="1" step="1" placeholder="f.eks. 450">
+          <span class="form-hint">7,5 timer = 450 min</span>
+        </div>
+        <div class="form-row">
+          <label>Energi (kWh)</label>
+          <input type="number" id="manual-energy" min="0" step="0.001" placeholder="0">
+          <span class="form-hint">Valgfri</span>
+        </div>
+        <div class="form-row">
+          <label>Pris (kr)</label>
+          <input type="number" id="manual-cost" min="0" step="0.01" placeholder="0">
+          <span class="form-hint">Valgfri</span>
+        </div>
+        <div class="form-actions">
+          <button class="save-btn" id="manual-save-btn" ${this._manualSaving?"disabled":""}>
+            ${this._manualSaving?"\ud83d\udcbe Gemmer...":"\ud83d\udcbe Tilf\u00f8j korrektion"}
+          </button>
+        </div>
+        ${this._manualMsg?`<div class="cfg-banner ${this._manualMsg.ok?"success":"error"}">${this._esc(this._manualMsg.text)}</div>`:""}
+      </div>
+      <div class="admin-hint">Brug kun til sj\u00e6ldne tilf\u00e6lde hvor en session ikke blev registreret automatisk (f.eks. filer overskrevet midt i en session). Tilf\u00f8jer et ekstra punkt til InfluxDB tagget <code>source=manual</code> og opdaterer m\u00e5nedstotalerne med det samme.</div>
       <div class="admin-hint">Rediger under <strong>Indstillinger → Enheder & tjenester → PC User Statistics → Konfigurer</strong></div>`;
   }
 
@@ -1594,6 +1672,11 @@ class PcUserStatisticsPanel extends HTMLElement {
         const checked=[...root.querySelectorAll(".dev-check:checked")].map(c=>c.value);
         this._saveDevices(checked);
       });
+    });
+
+    // Manual correction (Admin tab)
+    root.getElementById("manual-save-btn")?.addEventListener("click",()=>{
+      this._saveManualEntry();
     });
 
     // Config save
