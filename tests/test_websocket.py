@@ -24,33 +24,46 @@ from custom_components.pc_user_statistics.const import DOMAIN
 
 class TestGetCoordinator:
 
-    def test_returns_coordinator_when_present(self):
+    def test_returns_coordinator_from_runtime_data(self):
         coord = MagicMock()
-        coord.tracked_users = ["flemming"]
+        entry = MagicMock()
+        entry.runtime_data = coord
         hass = MagicMock()
-        hass.data = {DOMAIN: {"coord": coord}}
+        hass.config_entries.async_entries.return_value = [entry]
+
+        result = _get_coordinator(hass)
+
+        assert result is coord
+        hass.config_entries.async_entries.assert_called_once_with(DOMAIN)
+
+    def test_returns_none_when_no_entries(self):
+        hass = MagicMock()
+        hass.config_entries.async_entries.return_value = []
+        result = _get_coordinator(hass)
+        assert result is None
+
+    def test_returns_none_when_runtime_data_is_none(self):
+        entry = MagicMock()
+        entry.runtime_data = None
+        hass = MagicMock()
+        hass.config_entries.async_entries.return_value = [entry]
+
+        result = _get_coordinator(hass)
+        assert result is None
+
+    def test_skips_entries_without_runtime_data_and_returns_next(self):
+        # Entry with no runtime_data attribute at all
+        entry_without_attr = object()
+
+        coord = MagicMock()
+        entry_with_data = MagicMock()
+        entry_with_data.runtime_data = coord
+
+        hass = MagicMock()
+        hass.config_entries.async_entries.return_value = [entry_without_attr, entry_with_data]
+
         result = _get_coordinator(hass)
         assert result is coord
-
-    def test_returns_none_when_domain_not_in_data(self):
-        hass = MagicMock()
-        hass.data = {}
-        result = _get_coordinator(hass)
-        assert result is None
-
-    def test_returns_none_when_no_coordinator_with_tracked_users(self):
-        # MagicMock(spec=object) has no extra attributes — hasattr returns False
-        plain_mock = MagicMock(spec=object)
-        hass = MagicMock()
-        hass.data = {DOMAIN: {"store": plain_mock}}
-        result = _get_coordinator(hass)
-        assert result is None
-
-    def test_returns_none_when_domain_empty(self):
-        hass = MagicMock()
-        hass.data = {DOMAIN: {}}
-        result = _get_coordinator(hass)
-        assert result is None
 
 
 # ── _get_store ─────────────────────────────────────────────────────────────
@@ -113,6 +126,9 @@ class TestWsGetStats:
         }
         hass = MagicMock()
         hass.data = {DOMAIN: {"coord": coord}}
+        entry = MagicMock()
+        entry.runtime_data = coord
+        hass.config_entries.async_entries.return_value = [entry]
         connection = MagicMock()
         msg = {"id": 1}
         return hass, connection, msg, coord
@@ -138,6 +154,7 @@ class TestWsGetStats:
     def test_sends_error_when_no_coordinator(self):
         hass = MagicMock()
         hass.data = {DOMAIN: {}}
+        hass.config_entries.async_entries.return_value = []
         connection = MagicMock()
         ws_get_stats(hass, connection, {"id": 1})
         connection.send_error.assert_called_once()
@@ -155,6 +172,9 @@ class TestWsGetSystem:
         coord.last_update_success = True
         hass = MagicMock()
         hass.data = {DOMAIN: {"coord": coord}}
+        entry = MagicMock()
+        entry.runtime_data = coord
+        hass.config_entries.async_entries.return_value = [entry]
         connection = MagicMock()
 
         ws_get_system(hass, connection, {"id": 1})
@@ -165,6 +185,7 @@ class TestWsGetSystem:
     def test_sends_error_when_no_coordinator(self):
         hass = MagicMock()
         hass.data = {}
+        hass.config_entries.async_entries.return_value = []
         connection = MagicMock()
         ws_get_system(hass, connection, {"id": 1})
         connection.send_error.assert_called_once()

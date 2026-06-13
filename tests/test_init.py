@@ -18,6 +18,11 @@ def get_normalize():
     return _normalize_user_map
 
 
+def get_assert_string_user_map():
+    from custom_components.pc_user_statistics.__init__ import _assert_string_user_map
+    return _assert_string_user_map
+
+
 class TestNormalizeUserMap:
 
     def test_plain_strings_passthrough(self):
@@ -83,6 +88,37 @@ class TestNormalizeUserMap:
         }
         result = fn(raw)
         assert result == {"konge": "flemming", "lukas": "lukas"}
+
+
+# ── _assert_string_user_map (Fix 4) ────────────────────────────────────────
+
+class TestAssertStringUserMap:
+
+    def test_all_strings_returned_unchanged(self):
+        fn = get_assert_string_user_map()
+        user_map = {"konge": "flemming", "lukas": "lukas"}
+        result = fn(user_map)
+        assert result == user_map
+
+    def test_empty_map_returned_unchanged(self):
+        fn = get_assert_string_user_map()
+        assert fn({}) == {}
+
+    def test_non_string_value_removed_and_logged(self):
+        fn = get_assert_string_user_map()
+        user_map = {"konge": "flemming", "lukas": {"user_id": "lukas"}}
+        with patch("custom_components.pc_user_statistics.__init__._LOGGER") as mock_logger:
+            result = fn(user_map)
+            mock_logger.error.assert_called_once()
+        assert result == {"konge": "flemming"}
+        assert "lukas" not in result
+
+    def test_all_non_string_values_results_in_empty_map(self):
+        fn = get_assert_string_user_map()
+        user_map = {"konge": 123, "lukas": None}
+        with patch("custom_components.pc_user_statistics.__init__._LOGGER"):
+            result = fn(user_map)
+        assert result == {}
 
 
 # ── Write buffer ───────────────────────────────────────────────────────────
@@ -273,3 +309,83 @@ class TestGetData:
         # pending is merged: 0.0 + 60.0 = 60.0
         assert data["monthly"]["flemming"]["time"] == 60.0
         assert data["monthly_loaded"] is False
+
+
+# ── _schedule_session_flush liveness guard (Fix 2) ─────────────────────────
+
+class TestScheduleSessionFlushLivenessGuard:
+    """Tests for the Fix 2 overdue-flush warning in _schedule_session_flush."""
+
+    def _make_coord(self, last_flush_monotonic=0.0, current_user=None, unloaded=False):
+        from custom_components.pc_user_statistics.__init__ import PCStatisticsCoordinator
+
+        hass = MagicMock()
+        hass.async_create_task = MagicMock()
+
+        coord = MagicMock()
+        coord.hass = hass
+        coord._unloaded = unloaded
+        coord._last_flush_monotonic = last_flush_monotonic
+        coord.current_user = current_user
+        coord._session_flush_cancel = None
+        coord._schedule_session_flush = PCStatisticsCoordinator._schedule_session_flush.__get__(coord)
+        return coord
+
+    @patch("custom_components.pc_user_statistics.__init__.async_call_later")
+    @patch("custom_components.pc_user_statistics.__init__.time")
+    def test_warns_when_flush_overdue_with_active_session(self, mock_time, mock_call_later):
+        mock_time.monotonic.return_value = 1000.0
+        coord = self._make_coord(last_flush_monotonic=800.0, current_user="flemming")  # 200s overdue
+
+        with patch("custom_components.pc_user_statistics.__init__._LOGGER") as mock_logger:
+            coord._schedule_session_flush()
+            mock_logger.warning.assert_called_once()
+
+    @patch("custom_components.pc_user_statistics.__init__.async_call_later")
+    @patch("custom_components.pc_user_statistics.__init__.time")
+    def test_no_warning_when_flush_recent(self, mock_time, mock_call_later):
+        mock_time.monotonic.return_value = 1000.0
+        coord = self._make_coord(last_flush_monotonic=970.0, current_user="flemming")  # 30s
+
+        with patch("custom_components.pc_user_statistics.__init__._LOGGER") as mock_logger:
+            coord._schedule_session_flush()
+            mock_logger.warning.assert_not_called()
+
+    @patch("custom_components.pc_user_statistics.__init__.async_call_later")
+    @patch("custom_components.pc_user_statistics.__init__.time")
+    def test_no_warning_when_no_active_user(self, mock_time, mock_call_later):
+        mock_time.monotonic.return_value = 1000.0
+        coord = self._make_coord(last_flush_monotonic=800.0, current_user=None)  # 200s, but idle
+
+        with patch("custom_components.pc_user_statistics.__init__._LOGGER") as mock_logger:
+            coord._schedule_session_flush()
+            mock_logger.warning.assert_not_called()
+
+    @patch("custom_components.pc_user_statistics.__init__.async_call_later")
+    @patch("custom_components.pc_user_statistics.__init__.time")
+    def test_no_warning_on_first_run(self, mock_time, mock_call_later):
+        mock_time.monotonic.return_value = 1000.0
+        coord = self._make_coord(last_flush_monotonic=0.0, current_user="flemming")  # never flushed yet
+
+        with patch("custom_components.pc_user_statistics.__init__._LOGGER") as mock_logger:
+            coord._schedule_session_flush()
+            mock_logger.warning.assert_not_called()
+
+    @patch("custom_components.pc_user_statistics.__init__.async_call_later")
+    def test_returns_early_when_unloaded(self, mock_call_later):
+        coord = self._make_coord(unloaded=True)
+        coord._schedule_session_flush()
+        mock_call_later.assert_not_called()
+
+    @patch("custom_components.pc_user_statistics.__init__.async_call_later")
+    @patch("custom_components.pc_user_statistics.__init__.time")
+    def test_cancels_previous_timer_before_rescheduling(self, mock_time, mock_call_later):
+        mock_time.monotonic.return_value = 1000.0
+        coord = self._make_coord(last_flush_monotonic=990.0, current_user="flemming")
+        previous_cancel = MagicMock()
+        coord._session_flush_cancel = previous_cancel
+
+        coord._schedule_session_flush()
+
+        previous_cancel.assert_called_once()
+        mock_call_later.assert_called_once()
