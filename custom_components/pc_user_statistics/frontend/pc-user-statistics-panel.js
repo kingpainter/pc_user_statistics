@@ -1,6 +1,22 @@
 // PC User Statistics Panel
-// Version: 3.1.0 — Vanilla JS (no imports)
-// Last Updated: June 13, 2026
+// Version: 3.2.0 — Vanilla JS (no imports)
+// Last Updated: June 26, 2026
+//
+// Changes in 3.2.0:
+//   FIX 1: watt-entity læses fra this._config?.watt_entity i stedet for hardcodet
+//           entity ID — watt-ringen opdateres korrekt når entity ændres via config.
+//   FIX 2: Admin health-grid viser nu flush_timer_active (grøn/rød Flush-timer metric).
+//           statusBar inkluderer timer-status i allOk-beregning og statusLabel.
+//   FIX 3: Sticky Gem-knap i Config-tab — position:sticky bottom:0 så knappen
+//           altid er synlig uden at scrolle til bunden af den lange formular.
+//   FIX 4: Historik-tab skeleton loader — spinner + animerede placeholder-bars
+//           i stedet for en tom tom tekst-linje.
+//   FIX 5: Live idle-state viser nu hvem der ledte måneden i stedet for
+//           den kryptiske "data tilgængeligt i Statistik"-tekst.
+//   FIX 6: Donut vises øverst i Statistik-tab på mobil (via .statistik-donut-mobile)
+//           — .statistik-right skjules, donut-mobile vises. Desktop uændret.
+//   FIX 7: Notifikationer-tab: 24px margin-top på Premade regler-sektionen
+//           giver tydeligt visuelt skel fra devices-sektionen.
 //
 // Changes in 3.1.0:
 //   NEW: Manual correction form on Admin tab — "Manuel korrektion".
