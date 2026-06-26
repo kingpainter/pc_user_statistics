@@ -1,7 +1,14 @@
 # File Name: store.py
-# Version: 2.8.0
+# Version: 2.9.0
 # Description: Persistent storage for notification rules using HA store (.storage).
-# Last Updated: June 5, 2026
+# Last Updated: June 26, 2026
+#
+# Changes in 2.9.0:
+#   FIX: async_flush() and async_flush_session() now wrapped in try/except.
+#        Previously a storage failure (disk full, permissions) would propagate
+#        as an unhandled exception and silently drop session data or rule state.
+#        Errors are now logged at ERROR level and swallowed so the coordinator
+#        continues running.
 #
 # Changes in 2.8.0:
 #   NEW: Split storage into two independent keys:
@@ -255,8 +262,11 @@ class NotificationStore:
         Called once after all notification rules are evaluated, rather than
         writing on every individual rule trigger.
         """
-        await self._store.async_save(self._data)
-        _LOGGER.debug("Notification store flushed to disk")
+        try:
+            await self._store.async_save(self._data)
+            _LOGGER.debug("Notification store flushed to disk")
+        except Exception as err:
+            _LOGGER.error("Failed to flush notification store to disk: %s", err)
 
     async def async_mark_sent(self, rule_id: str, user: str, timestamp: float) -> None:
         """Mark a notification as sent and persist immediately.
@@ -313,8 +323,11 @@ class NotificationStore:
         Uses a separate storage key from config/rules so frequent session
         writes (every 60s) do not touch the config store.
         """
-        await self._session_store.async_save(self._session_data)
-        _LOGGER.debug("Session snapshot flushed to disk")
+        try:
+            await self._session_store.async_save(self._session_data)
+            _LOGGER.debug("Session snapshot flushed to disk")
+        except Exception as err:
+            _LOGGER.error("Failed to flush session snapshot to disk: %s", err)
 
     async def async_clear_session(self) -> None:
         """Clear the session snapshot from the dedicated session store.
@@ -323,5 +336,8 @@ class NotificationStore:
         next HA startup. Does NOT affect notification rules or devices.
         """
         self._session_data = {}
-        await self._session_store.async_save({})
-        _LOGGER.debug("Session snapshot cleared from disk")
+        try:
+            await self._session_store.async_save({})
+            _LOGGER.debug("Session snapshot cleared from disk")
+        except Exception as err:
+            _LOGGER.error("Failed to clear session snapshot from disk: %s", err)

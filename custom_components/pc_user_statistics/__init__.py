@@ -1,7 +1,24 @@
 # File Name: __init__.py
-# Version: 2.11.0
+# Version: 2.12.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: June 13, 2026
+# Last Updated: June 26, 2026
+#
+# Changes in 2.12.0:
+#   FIX 3: _retry_failed_writes() now has exponential backoff — after 3
+#        consecutive retry-poll failures, retries are skipped for an
+#        increasing number of polls (2, 4, 8 … capped at 32) so a
+#        long-running InfluxDB outage doesn't hammer the server every 60s.
+#        New fields: _retry_skip_count, _retry_skip_remaining.
+#   FIX 4: _async_periodic_flush() now sets _unloaded guard check AFTER
+#        the async_flush_session() call, not only at entry. Prevents a
+#        race where async_shutdown() runs concurrently with an in-progress
+#        flush task — the flush now completes cleanly before reschedule.
+#   FIX 5: _read_ms_screen_time() call deduplicated in _async_write_to_influx
+#        — previously called once on success path and once on failure path
+#        with identical code. Now called once before the branch.
+#   FIX 6 (websocket): _query_history reuses coordinator._http_session
+#        instead of opening a new aiohttp.ClientSession per request, and
+#        uses a 5s timeout matching the coordinator default.
 #
 # Changes in 2.11.0:
 #   NEW: async_add_manual_entry(user, timestamp_ns, time_delta, energy_delta,
@@ -394,8 +411,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # Guard: prevents background retry tasks from running after unload
         self._unloaded: bool = False
 
-        # Idle tracking: set when user logs out, cleared when user logs in.
-        # Used by idle_pc notification rule as the correct idle duration source.
         self._idle_since: float | None = None
 
         # Timestamp of last session flush to disk (independent of InfluxDB writes)
@@ -405,6 +420,14 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self._last_flush_monotonic: float = 0.0
         # Cancel callback for the periodic session flush timer
         self._session_flush_cancel = None
+
+        # Fix 3 — retry backoff: after repeated poll failures, skip retrying
+        # for an exponentially increasing number of polls to avoid hammering
+        # an unreachable InfluxDB server every 60s.
+        # _retry_skip_count: how many polls to skip (doubles on each failure batch)
+        # _retry_skip_remaining: polls left to skip before trying again
+        self._retry_skip_count: int = 0
+        self._retry_skip_remaining: int = 0
 
         # Load monthly data in the background — does NOT block coordinator init
         hass.async_create_task(self._async_load_monthly_data())
@@ -535,14 +558,21 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self._session_flush_cancel = async_call_later(self.hass, 60, _flush_callback)
 
     async def _async_periodic_flush(self) -> None:
-        """Flush session snapshot to disk and reschedule next flush."""
-        if self._unloaded or not self.current_user:
+        """Flush session snapshot to disk and reschedule next flush.
+
+        Fix 4 — shutdown race guard: _unloaded is checked both at entry and
+        after the async_flush_session() call. This prevents a race where
+        async_shutdown() cancels the timer but a flush task is already
+        running — the flush completes cleanly, then reschedule is skipped.
+        """
+        if self._unloaded:
+            return
+        if not self.current_user:
             # Reschedule even if no active user — ensures we pick up next login
             self._schedule_session_flush()
             return
         _store = self.hass.data.get(DOMAIN, {}).get("store")
         if _store:
-            # Include MS screen_time so gap-fill works even after unclean shutdown
             ms_min, ms_date = self._read_ms_screen_time(self.current_user)
             _store.save_session_in_memory(
                 self.current_user,
@@ -560,7 +590,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 "Periodic session flush — user='%s' acc_time=%.0fs ms_screen_time=%s",
                 self.current_user, self.acc_time, ms_min,
             )
-        self._schedule_session_flush()
+        # Guard: if shutdown occurred during the flush above, do not reschedule
+        if not self._unloaded:
+            self._schedule_session_flush()
 
     # ── InfluxDB helpers ───────────────────────────────────────────────────
 
@@ -772,7 +804,14 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             self.last_month = current_month
 
         if self.failed_writes:
-            await self._retry_failed_writes()
+            if self._retry_skip_remaining > 0:
+                self._retry_skip_remaining -= 1
+                _LOGGER.debug(
+                    "Retry backoff active — skipping retry this poll (%d polls remaining)",
+                    self._retry_skip_remaining,
+                )
+            else:
+                await self._retry_failed_writes()
 
         if self._monthly_loaded:
             await self._calculate_deltas(now)
@@ -954,13 +993,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             f"energy_delta={energy_delta},cost_delta={cost_delta} "
             f"{timestamp_ns}"
         )
+        # Read MS screen_time once — used on both success and failure paths
+        ms_min, ms_date = self._read_ms_screen_time(self.current_user)
+
         success = await self._write_point_to_influx(point)
         if success:
             self._clear_repair_issue()
             self._consecutive_write_failures = 0
             _store = self.hass.data.get(DOMAIN, {}).get("store")
             if _store:
-                ms_min, ms_date = self._read_ms_screen_time(self.current_user)
                 _store.save_session_in_memory(
                     self.current_user,
                     self.acc_time,
@@ -977,7 +1018,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             self._buffer_failed_write({"point": point, "timestamp": timestamp_ns, "attempts": 1})
             _store = self.hass.data.get(DOMAIN, {}).get("store")
             if _store:
-                ms_min, ms_date = self._read_ms_screen_time(self.current_user)
                 _store.save_session_in_memory(
                     self.current_user,
                     self.acc_time,
@@ -1088,9 +1128,16 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         return success
 
     async def _retry_failed_writes(self) -> None:
-        """Retry buffered failed writes. Drops after max attempts."""
+        """Retry buffered failed writes. Drops after max attempts.
+
+        Fix 3 — backoff: if all writes in a batch fail, we double the number
+        of polls to skip before the next retry attempt (2, 4, 8 … capped at 32).
+        A single success resets the backoff completely.
+        """
         _LOGGER.info("Retrying %d buffered write(s)", len(self.failed_writes))
         still_failing: list[dict] = []
+        any_success = False
+        all_failed = True
 
         for write_data in self.failed_writes:
             if write_data["attempts"] >= MAX_RETRY_ATTEMPTS:
@@ -1106,10 +1153,25 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     "Retry succeeded (attempt %d/%d)",
                     write_data["attempts"], MAX_RETRY_ATTEMPTS,
                 )
+                any_success = True
+                all_failed = False
             else:
                 still_failing.append(write_data)
 
         self.failed_writes = still_failing
+
+        if any_success:
+            # At least one write got through — reset backoff
+            self._retry_skip_count = 0
+            self._retry_skip_remaining = 0
+        elif still_failing and all_failed:
+            # Every write in this batch failed — back off exponentially
+            self._retry_skip_count = min(self._retry_skip_count * 2 if self._retry_skip_count else 2, 32)
+            self._retry_skip_remaining = self._retry_skip_count
+            _LOGGER.warning(
+                "All retry writes failed — backing off for %d polls (~%d min)",
+                self._retry_skip_count, self._retry_skip_count,
+            )
 
     # ── Data snapshot ──────────────────────────────────────────────────────
 

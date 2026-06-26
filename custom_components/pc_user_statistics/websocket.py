@@ -1,7 +1,14 @@
 # File Name: websocket.py
-# Version: 3.2.0
+# Version: 3.3.0
 # Description: WebSocket API for the PC User Statistics panel.
-# Last Updated: June 13, 2026
+# Last Updated: June 26, 2026
+#
+# Changes in 3.3.0:
+#   FIX 6: _query_history now reuses coordinator._http_session (the persistent
+#        aiohttp.ClientSession with auth pre-configured) instead of opening a
+#        new session per request. Eliminates per-request TCP connection overhead
+#        and uses coordinator._influx_base_url for consistency. Timeout reduced
+#        to 5s (matching coordinator default) from 10s.
 #
 # Changes in 3.2.0:
 #   NEW: ws_add_manual_entry (pc_user_statistics/add_manual_entry) — lets the
@@ -481,8 +488,12 @@ async def ws_get_history(hass, connection, msg):
 
 
 async def _query_history(coordinator, days: int) -> dict:
-    """Run InfluxDB GROUP BY time(1d) query and return structured data."""
-    import aiohttp, urllib.parse
+    """Run InfluxDB GROUP BY time(1d) query and return structured data.
+
+    Fix 6: reuses coordinator._http_session (auth pre-configured, persistent
+    TCP connection) instead of opening a new ClientSession per request.
+    """
+    import urllib.parse
     from datetime import datetime, timedelta, timezone
 
     cfg = coordinator.config
@@ -498,17 +509,14 @@ async def _query_history(coordinator, days: int) -> dict:
     )
 
     try:
-        async with aiohttp.ClientSession() as session:
-            params = urllib.parse.urlencode({"q": query, "db": cfg["database"]})
-            auth   = aiohttp.BasicAuth(cfg["username"], cfg["password"])
-            async with session.get(
-                f"http://{cfg['host']}:{cfg['port']}/query?{params}",
-                auth=auth,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    return {"days": [], "users": [], "series": {}}
-                data = await resp.json()
+        params = urllib.parse.urlencode({"q": query, "db": cfg["database"]})
+        async with coordinator._http_session.get(
+            f"{coordinator._influx_base_url}/query?{params}",
+            timeout=coordinator._http_session.timeout,
+        ) as resp:
+            if resp.status != 200:
+                return {"days": [], "users": [], "series": {}}
+            data = await resp.json()
     except Exception as err:
         _LOGGER.warning("History query failed: %s", err)
         return {"days": [], "users": [], "series": {}}

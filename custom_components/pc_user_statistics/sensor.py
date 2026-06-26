@@ -1,8 +1,12 @@
 # File Name: sensor.py
-# Version: 2.6.2
+# Version: 2.12.0
 # Description: Sensor entities for the PC User Statistics integration.
-# Last Updated: March 3, 2026
+# Last Updated: June 26, 2026
 #
+# Changes in 2.12.0:
+#   FIX: async_setup_entry now reads coordinator via entry.runtime_data
+#        instead of hass.data[DOMAIN][config_entry.entry_id]. Aligns with
+#        the Fix 1A pattern established in __init__.py v2.10.0.
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.const import EntityCategory
@@ -33,7 +37,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up PC User Statistics sensors."""
-    coordinator = hass.data[DOMAIN][config_entry.entry_id]
+    coordinator = config_entry.runtime_data
     entities = []
 
     # Hub sensors (live status) — diagnostic category
