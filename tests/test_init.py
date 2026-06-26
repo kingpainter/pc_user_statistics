@@ -391,7 +391,176 @@ class TestScheduleSessionFlushLivenessGuard:
         mock_call_later.assert_called_once()
 
 
-# ── async_add_manual_entry ───────────────────────────────────────────
+# ── _escape_influx_tag (v2.12.1) ──────────────────────────────────────────
+
+def get_escape_influx_tag():
+    from custom_components.pc_user_statistics.__init__ import _escape_influx_tag
+    return _escape_influx_tag
+
+
+class TestEscapeInfluxTag:
+
+    def test_plain_name_unchanged(self):
+        fn = get_escape_influx_tag()
+        assert fn("flemming") == "flemming"
+
+    def test_space_escaped(self):
+        fn = get_escape_influx_tag()
+        assert fn("john doe") == r"john\ doe"
+
+    def test_comma_escaped(self):
+        fn = get_escape_influx_tag()
+        assert fn("a,b") == r"a\,b"
+
+    def test_equals_escaped(self):
+        fn = get_escape_influx_tag()
+        assert fn("a=b") == r"a\=b"
+
+    def test_multiple_specials_all_escaped(self):
+        fn = get_escape_influx_tag()
+        assert fn("a b,c=d") == r"a\ b\,c\=d"
+
+    def test_empty_string_unchanged(self):
+        fn = get_escape_influx_tag()
+        assert fn("") == ""
+
+    def test_normal_users_unchanged(self):
+        fn = get_escape_influx_tag()
+        for name in ("flemming", "lukas", "sebastian", "ADMIN", "user123"):
+            assert fn(name) == name
+
+
+# ── _retry_failed_writes backoff (v2.12.0 Fix 3) ───────────────────────────
+
+class TestRetryBackoff:
+    """Tests for the exponential backoff in _retry_failed_writes."""
+
+    def _make_coordinator(self):
+        from custom_components.pc_user_statistics.__init__ import PCStatisticsCoordinator
+        hass = MagicMock()
+        hass.data = {}
+        hass.async_create_task = MagicMock()
+        coord = MagicMock()
+        coord.hass = hass
+        coord.failed_writes = []
+        coord._retry_skip_count = 0
+        coord._retry_skip_remaining = 0
+        coord._retry_failed_writes = PCStatisticsCoordinator._retry_failed_writes.__get__(coord)
+        return coord
+
+    @pytest.mark.asyncio
+    async def test_success_resets_backoff(self):
+        coord = self._make_coordinator()
+        coord._retry_skip_count = 8
+        coord._retry_skip_remaining = 8
+        coord.failed_writes = [{"point": "p1", "timestamp": 1, "attempts": 1}]
+        coord._write_point_to_influx = AsyncMock(return_value=True)
+        await coord._retry_failed_writes()
+        assert coord._retry_skip_count == 0
+        assert coord._retry_skip_remaining == 0
+
+    @pytest.mark.asyncio
+    async def test_all_fail_sets_initial_backoff(self):
+        coord = self._make_coordinator()
+        coord.failed_writes = [{"point": "p1", "timestamp": 1, "attempts": 1}]
+        coord._write_point_to_influx = AsyncMock(return_value=False)
+        await coord._retry_failed_writes()
+        assert coord._retry_skip_count == 2
+        assert coord._retry_skip_remaining == 2
+
+    @pytest.mark.asyncio
+    async def test_backoff_doubles_on_repeated_failure(self):
+        coord = self._make_coordinator()
+        coord._retry_skip_count = 4
+        coord.failed_writes = [{"point": "p1", "timestamp": 1, "attempts": 1}]
+        coord._write_point_to_influx = AsyncMock(return_value=False)
+        await coord._retry_failed_writes()
+        assert coord._retry_skip_count == 8
+
+    @pytest.mark.asyncio
+    async def test_backoff_capped_at_32(self):
+        coord = self._make_coordinator()
+        coord._retry_skip_count = 32
+        coord.failed_writes = [{"point": "p1", "timestamp": 1, "attempts": 1}]
+        coord._write_point_to_influx = AsyncMock(return_value=False)
+        await coord._retry_failed_writes()
+        assert coord._retry_skip_count == 32
+
+    @pytest.mark.asyncio
+    async def test_empty_buffer_does_not_touch_backoff(self):
+        coord = self._make_coordinator()
+        coord._retry_skip_count = 4
+        coord._retry_skip_remaining = 2
+        coord.failed_writes = []
+        coord._write_point_to_influx = AsyncMock()
+        await coord._retry_failed_writes()
+        assert coord._retry_skip_count == 4
+        assert coord._retry_skip_remaining == 2
+
+
+# ── asyncio.Lock concurrent guard (v2.12.1 Fix 7) ──────────────────────────
+
+class TestUpdateLockGuard:
+    """Tests for the asyncio.Lock guard in _async_update_data."""
+
+    @pytest.mark.asyncio
+    async def test_skips_poll_when_lock_held(self):
+        from custom_components.pc_user_statistics.__init__ import PCStatisticsCoordinator
+        import asyncio
+
+        coord = MagicMock()
+        coord._update_lock = asyncio.Lock()
+        coord._get_data = MagicMock(return_value={"skipped": True})
+        coord._async_update_data = PCStatisticsCoordinator._async_update_data.__get__(coord)
+
+        # Acquire the lock to simulate an in-progress update
+        await coord._update_lock.acquire()
+        try:
+            result = await coord._async_update_data()
+        finally:
+            coord._update_lock.release()
+
+        assert result == {"skipped": True}
+        coord._get_data.assert_called_once()
+
+
+# ── last_power reset on logout (v2.12.1 Fix 4) ─────────────────────────────
+
+class TestLastPowerResetOnLogout:
+    """Tests that last_power is zeroed on logout to avoid stale avg_power."""
+
+    @pytest.mark.asyncio
+    async def test_last_power_zeroed_on_logout(self):
+        from custom_components.pc_user_statistics.__init__ import PCStatisticsCoordinator
+        import time as _time
+
+        hass = MagicMock()
+        hass.data = {"pc_user_statistics": {"store": None}}
+        hass.async_create_task = MagicMock()
+
+        coord = MagicMock()
+        coord.hass = hass
+        coord.current_user = "flemming"
+        coord.user_map = {"kong": "flemming"}
+        coord.last_power = 250.0  # stale power reading
+        coord.acc_time = 100.0
+        coord.acc_energy = 0.5
+        coord.acc_cost = 1.2
+        coord.last_time = _time.time()
+        coord.last_write_time = _time.time()
+        coord._idle_since = None
+        coord._calculate_deltas = AsyncMock()
+        coord._handle_user_change = PCStatisticsCoordinator._handle_user_change.__get__(coord)
+
+        # Simulate logout: new_state is None
+        event = MagicMock()
+        event.data = {"new_state": None}
+        now = _time.time()
+
+        await coord._handle_user_change(event, now)
+
+        assert coord.last_power == 0.0
+
 
 class TestAsyncAddManualEntry:
     """Tests for coordinator.async_add_manual_entry (manual correction)."""

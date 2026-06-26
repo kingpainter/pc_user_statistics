@@ -197,3 +197,102 @@ class TestSentHistory:
         store.reset_session_sent("flemming")
         # lukas should be unaffected
         assert store.get_last_sent("long_session", "lukas") == 8888.0
+
+
+# ── Storage error resilience (v2.9.0 / v2.9.1) ────────────────────────────
+
+class TestStorageErrorResilience:
+    """Tests that storage failures are caught and logged, not propagated."""
+
+    def make_store_with_failing_backend(self):
+        """Return a fully loaded store whose backend raises on all subsequent saves."""
+        hass = MagicMock()
+        store = NotificationStore(hass)
+
+        # Load phase: succeeds (returns None so defaults are seeded)
+        mock_ha_store = AsyncMock()
+        mock_ha_store.async_load = AsyncMock(return_value=None)
+        mock_ha_store.async_save = AsyncMock()  # succeeds during load/seed
+        store._store = mock_ha_store
+
+        mock_session_store = AsyncMock()
+        mock_session_store.async_load = AsyncMock(return_value={})
+        mock_session_store.async_save = AsyncMock()  # succeeds during load
+        store._session_store = mock_session_store
+
+        return store
+
+    async def _load_and_break(self, store):
+        """Load the store successfully, then make the backend fail on future saves."""
+        await store.async_load()
+        # Now break the backend for all future saves
+        store._store.async_save = AsyncMock(side_effect=Exception("disk full"))
+        store._session_store.async_save = AsyncMock(side_effect=Exception("disk full"))
+
+    @pytest.mark.asyncio
+    async def test_async_flush_does_not_raise_on_storage_error(self):
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        await store.async_flush()
+
+    @pytest.mark.asyncio
+    async def test_async_flush_session_does_not_raise_on_storage_error(self):
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        store.save_session_in_memory("flemming", 100.0, 0.5, 1.2, 0.0)
+        await store.async_flush_session()
+
+    @pytest.mark.asyncio
+    async def test_async_clear_session_does_not_raise_on_storage_error(self):
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        await store.async_clear_session()
+
+    @pytest.mark.asyncio
+    async def test_async_save_rule_does_not_raise_on_storage_error(self):
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        await store.async_save_rule("custom_rule", {"enabled": True, "trigger_type": "session_minutes"})
+
+    @pytest.mark.asyncio
+    async def test_async_save_devices_does_not_raise_on_storage_error(self):
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        await store.async_save_devices(["notify.mobile_app_test"])
+
+    @pytest.mark.asyncio
+    async def test_flush_error_logged_at_error_level(self):
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        with patch("custom_components.pc_user_statistics.store._LOGGER") as mock_log:
+            await store.async_flush()
+            mock_log.error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_flush_session_error_logged_at_error_level(self):
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        store.save_session_in_memory("flemming", 100.0, 0.5, 1.2, 0.0)
+        with patch("custom_components.pc_user_statistics.store._LOGGER") as mock_log:
+            await store.async_flush_session()
+            mock_log.error.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_in_memory_state_preserved_after_flush_error(self):
+        """A failed disk write must not corrupt in-memory state."""
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        store.mark_sent_in_memory("pause_reminder", "flemming", 1234.0)
+        await store.async_flush()
+        assert store.get_last_sent("pause_reminder", "flemming") == 1234.0
+
+    @pytest.mark.asyncio
+    async def test_session_state_preserved_after_flush_session_error(self):
+        store = self.make_store_with_failing_backend()
+        await self._load_and_break(store)
+        store.save_session_in_memory("flemming", 500.0, 1.0, 3.0, 0.0)
+        await store.async_flush_session()
+        snap = store.get_session()
+        assert snap is not None
+        assert snap["current_user"] == "flemming"
+        assert snap["acc_time"] == 500.0

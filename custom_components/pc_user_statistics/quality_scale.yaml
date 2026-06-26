@@ -1,11 +1,11 @@
 # quality_scale.yaml
 # Tracks PC User Statistics compliance with HA Integration Quality Scale.
 # See: https://developers.home-assistant.io/docs/integration_quality_scale_index/
-# Version: 2.6.2 | Last Updated: March 7, 2026
+# Version: 2.12.1 | Last Updated: June 26, 2026
 
 rules:
 
-  # ── No Score (Minimum Requirements) ────────────────────────────────────────
+  # -- No Score (Minimum Requirements) ------------------------------------------
   config-flow:
     status: done
     comment: config_flow.py with InfluxDB connection validation.
@@ -31,10 +31,10 @@ rules:
     status: done
     comment: All entities have unique IDs via coordinator entry_id + key.
 
-  # ── Bronze ──────────────────────────────────────────────────────────────────
+  # -- Bronze -------------------------------------------------------------------
   action-setup:
     status: exempt
-    comment: No custom services/actions — WebSocket API used instead.
+    comment: No custom services/actions -- WebSocket API used instead.
   common-modules:
     status: done
     comment: helpers.py, const.py, store.py, notification_manager.py.
@@ -55,21 +55,25 @@ rules:
     comment: has_entity_name = True on all entities.
   icon-translations:
     status: todo
-    comment: Icons defined in Python — consider moving to strings.json icons section.
+    comment: Icons defined in Python -- consider moving to strings.json icons section.
   reconfiguration-flow:
     status: done
     comment: async_step_reconfigure added in v2.5.0.
   repair-issues:
-    status: todo
-    comment: Planned — raise RepairIssue on persistent InfluxDB failures.
+    status: done
+    comment: >
+      RepairIssue raised after 5 consecutive InfluxDB write failures (v2.6.0).
+      Cleared automatically on next successful write.
   test-coverage:
     status: todo
-    comment: ~82% coverage. Target ≥95% for Gold.
+    comment: >
+      ~82% coverage at v2.8.0. New fixes in v2.12.x have tests added.
+      Target >=95% for Gold.
   translations:
     status: done
     comment: strings.json (EN) + da.json (DA) including reconfigure step.
 
-  # ── Silver ──────────────────────────────────────────────────────────────────
+  # -- Silver -------------------------------------------------------------------
   async-dependency:
     status: done
     comment: aiohttp is fully async. No blocking calls.
@@ -78,10 +82,10 @@ rules:
     comment: async_unload_entry closes aiohttp session and removes panel.
   diagnostics:
     status: done
-    comment: diagnostics.py added in v2.5.0.
+    comment: diagnostics.py added in v2.5.0. Uses entry.runtime_data (v2.12.1).
   entity-unavailable:
     status: done
-    comment: available property on all sensors — returns False when coordinator data missing.
+    comment: available property on all sensors -- returns False when coordinator data missing.
   integration-owner:
     status: done
     comment: codeowners = ["@kingpainter"] in manifest.json.
@@ -90,21 +94,21 @@ rules:
     comment: Logged at debug level to avoid log spam.
   parallel-updates:
     status: exempt
-    comment: Single coordinator drives all sensors — parallel updates not applicable.
+    comment: Single coordinator drives all sensors -- parallel updates not applicable.
   reauthentication-flow:
     status: done
-    comment: ConfigEntryAuthFailed raised on HTTP 401 — triggers HA re-auth flow.
+    comment: ConfigEntryAuthFailed raised on HTTP 401 -- triggers HA re-auth flow.
   test-before-configure:
     status: done
     comment: InfluxDB connection tested in config_flow before saving.
 
-  # ── Gold ────────────────────────────────────────────────────────────────────
+  # -- Gold ---------------------------------------------------------------------
   devices:
     status: done
     comment: Hub device + per-user devices with via_device links.
   discovery:
     status: exempt
-    comment: Local integration — discovery not applicable.
+    comment: Local integration -- discovery not applicable.
   docs-data-update:
     status: todo
     comment: Document coordinator polling interval and update strategy.
@@ -152,7 +156,15 @@ rules:
     comment: 60s polling interval, smart tab-aware panel refresh.
   injection-attacks:
     status: done
-    comment: InfluxDB writes use parameterised line protocol — no raw interpolation.
+    comment: >
+      InfluxDB tag values escaped via _escape_influx_tag() (v2.12.1).
+      Commas, spaces, and equals signs backslash-escaped per line protocol spec.
   strict-typing:
     status: todo
     comment: Type hints present but mypy strict not verified in CI.
+  runtime-data:
+    status: done
+    comment: >
+      entry.runtime_data = coordinator set in async_setup_entry (v2.10.0).
+      All lookups (websocket, sensor, diagnostics, system_health) use
+      entry.runtime_data as of v2.12.1.
