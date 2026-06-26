@@ -469,7 +469,10 @@ class PcUserStatisticsPanel extends HTMLElement {
     .live-stat-val  { font-size:16px; font-weight:700; font-family:'DM Mono',monospace; flex:1; }
     .live-stat-lbl  { font-size:11px; color:var(--sub); }
     .live-stat.active .live-stat-val { position:relative; }
-    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.3} }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-spinner { display:inline-block; width:18px; height:18px; border:2px solid var(--div);
+      border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite;
+      flex-shrink:0; }
     .pulse-dot { display:inline-block; width:6px; height:6px; background:var(--accent);
       border-radius:50%; margin-left:6px; vertical-align:middle;
       animation:pulse-dot 1.6s ease-in-out infinite; }
@@ -683,6 +686,9 @@ class PcUserStatisticsPanel extends HTMLElement {
       background:rgba(239,68,68,.15); color:var(--red); cursor:pointer; font-size:13px;
       flex-shrink:0; align-self:flex-end; margin-bottom:1px; }
     .cfg-save-row { display:flex; gap:10px; margin:20px 0 16px; }
+    .cfg-save-row.sticky { position:sticky; bottom:0; z-index:10;
+      background:var(--bg); padding:12px 0 12px; margin:0;
+      border-top:1px solid var(--div); }
     .cfg-save-btn { min-width:220px; }
     .cfg-banner { padding:12px 16px; border-radius:10px; font-size:13px; font-weight:500; margin-bottom:16px; }
     .cfg-banner.success { background:rgba(16,185,129,.1); color:#059669; border:1px solid rgba(16,185,129,.25); }
@@ -1446,7 +1452,7 @@ class PcUserStatisticsPanel extends HTMLElement {
       </div>
       <button class="reset-tabs-btn">↺ Nulstil rækkefølge</button>
       <div class="section-title" style="margin-top:24px">💾 Gem konfiguration</div>
-      <div class="cfg-save-row">
+      <div class="cfg-save-row sticky">
         <button class="cfg-save-btn save-btn" ${this._configSaving?"disabled":""}>
           ${this._configSaving?"💾 Gemmer og genindlæser...":"💾 Gem konfiguration"}
         </button>
