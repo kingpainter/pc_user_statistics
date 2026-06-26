@@ -1,8 +1,12 @@
 # File Name: diagnostics.py
-# Version: 2.6.2
+# Version: 2.12.1
 # Description: Diagnostics support for PC User Statistics integration.
 #              Allows users to download debug info from HA UI (Gold quality scale requirement).
-# Last Updated: March 7, 2026
+# Last Updated: June 26, 2026
+#
+# Changes in 2.12.1:
+#   FIX: coordinator lookup now uses entry.runtime_data instead of duck-typing
+#        on hass.data[DOMAIN].values() with hasattr(tracked_users).
 
 from __future__ import annotations
 
@@ -22,11 +26,7 @@ async def async_get_config_entry_diagnostics(
 
     Sensitive values (password) are redacted automatically by HA.
     """
-    coordinator = None
-    for value in hass.data.get(DOMAIN, {}).values():
-        if hasattr(value, "tracked_users"):
-            coordinator = value
-            break
+    coordinator = entry.runtime_data if hasattr(entry, "runtime_data") else None
 
     coordinator_data: dict[str, Any] = {}
     if coordinator:

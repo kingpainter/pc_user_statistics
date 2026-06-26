@@ -1,7 +1,11 @@
 # File Name: store.py
-# Version: 2.9.0
+# Version: 2.9.1
 # Description: Persistent storage for notification rules using HA store (.storage).
 # Last Updated: June 26, 2026
+#
+# Changes in 2.9.1:
+#   FIX: async_save_rule() and async_save_devices() now wrapped in try/except.
+#        Consistent with async_flush()/async_flush_session() fix in v2.9.0.
 #
 # Changes in 2.9.0:
 #   FIX: async_flush() and async_flush_session() now wrapped in try/except.
@@ -183,8 +187,11 @@ class NotificationStore:
     async def async_save_rule(self, rule_id: str, config: dict[str, Any]) -> None:
         """Save (create or update) a rule."""
         self._data.setdefault("rules", {})[rule_id] = config
-        await self._store.async_save(self._data)
-        _LOGGER.debug("Saved rule: %s", rule_id)
+        try:
+            await self._store.async_save(self._data)
+            _LOGGER.debug("Saved rule: %s", rule_id)
+        except Exception as err:
+            _LOGGER.error("Failed to save rule '%s' to disk: %s", rule_id, err)
 
     async def async_delete_rule(self, rule_id: str) -> bool:
         """Delete a custom rule. Returns False if it's a premade rule."""
@@ -223,8 +230,11 @@ class NotificationStore:
     async def async_save_devices(self, devices: list[str]) -> None:
         """Save configured devices."""
         self._data["devices"] = devices
-        await self._store.async_save(self._data)
-        _LOGGER.info("Saved %d notification devices", len(devices))
+        try:
+            await self._store.async_save(self._data)
+            _LOGGER.info("Saved %d notification devices", len(devices))
+        except Exception as err:
+            _LOGGER.error("Failed to save devices to disk: %s", err)
 
     # ── Sent tracking (anti-spam) ────────────────────────────────────────────
 

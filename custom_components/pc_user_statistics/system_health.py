@@ -1,14 +1,12 @@
 # File Name: system_health.py
-# Version: 2.6.2
+# Version: 2.12.1
 # Description: System health platform for PC User Statistics.
 #              Exposes integration state in Settings → System → Repairs → System Information.
-# Last Updated: March 8, 2026
+# Last Updated: June 26, 2026
 #
-# Changes in 2.6.2:
-#   - FIX: last_write_time check changed from falsy to explicit None/0 guard.
-#     Shows "Afventer data..." neutrally during startup instead of "aldrig" (orange warning).
-#   - FIX: monthly_data_loaded now returns a human-readable string instead of a raw
-#     boolean, so HA doesn't show a confusing ✅/❌ for a transient loading state.
+# Changes in 2.12.1:
+#   FIX: coordinator lookup now uses entry.runtime_data instead of
+#        hass.data[DOMAIN][entry_id] (old pattern).
 
 from __future__ import annotations
 
@@ -39,7 +37,8 @@ async def async_system_health_info(hass: HomeAssistant) -> dict[str, Any]:
     if not entries:
         return {"error": "Integration not configured"}
 
-    coordinator = hass.data.get(DOMAIN, {}).get(entries[0].entry_id)
+    entry = entries[0]
+    coordinator = getattr(entry, "runtime_data", None)
     if coordinator is None:
         return {"error": "Integration not loaded"}
 

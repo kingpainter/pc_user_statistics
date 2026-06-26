@@ -1,7 +1,18 @@
 # File Name: __init__.py
-# Version: 2.12.0
+# Version: 2.12.1
 # Description: Main setup and coordinator for the PC User Statistics integration.
 # Last Updated: June 26, 2026
+#
+# Changes in 2.12.1:
+#   FIX 1: diagnostics.py uses entry.runtime_data (done in diagnostics.py)
+#   FIX 2: system_health.py uses entry.runtime_data (done in system_health.py)
+#   FIX 3: _idle_since comment restored in __init__
+#   FIX 4: last_power reset to 0.0 on logout in _handle_user_change
+#   FIX 5: _escape_influx_tag() helper — escapes commas, spaces, equals in
+#        user tag values for InfluxDB line protocol correctness
+#   FIX 6: store.py async_save_rule/async_save_devices try/except (done in store.py)
+#   FIX 7: asyncio.Lock guard in _async_update_data prevents concurrent
+#        execution if a poll takes longer than the 60s update interval
 #
 # Changes in 2.12.0:
 #   FIX 3: _retry_failed_writes() now has exponential backoff — after 3
@@ -203,6 +214,17 @@ def _assert_string_user_map(user_map: dict[str, str]) -> dict[str, str]:
         "these entries will be ignored: %s", non_strings,
     )
     return {k: v for k, v in user_map.items() if isinstance(v, str)}
+
+
+def _escape_influx_tag(value: str) -> str:
+    """Escape special characters in InfluxDB line protocol tag values.
+
+    InfluxDB line protocol treats commas, spaces, and equals signs as
+    delimiters in tag key/value pairs. They must be backslash-escaped.
+    Without this, a user name like 'john doe' would silently corrupt the
+    line protocol and cause the write to fail or be misattributed.
+    """
+    return value.replace(",", r"\,").replace(" ", r"\ ").replace("=", r"\=")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -411,6 +433,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # Guard: prevents background retry tasks from running after unload
         self._unloaded: bool = False
 
+        # Idle tracking: set when user logs out, cleared when user logs in.
+        # Used by idle_pc notification rule as the correct idle duration source.
         self._idle_since: float | None = None
 
         # Timestamp of last session flush to disk (independent of InfluxDB writes)
@@ -420,6 +444,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self._last_flush_monotonic: float = 0.0
         # Cancel callback for the periodic session flush timer
         self._session_flush_cancel = None
+
+        # Fix 7 — concurrent execution guard: DataUpdateCoordinator schedules
+        # _async_update_data on a fixed interval. If a call takes longer than
+        # the interval (e.g. slow InfluxDB), a second call can start before the
+        # first finishes, causing double-writes. The lock prevents this.
+        self._update_lock: asyncio.Lock = asyncio.Lock()
 
         # Fix 3 — retry backoff: after repeated poll failures, skip retrying
         # for an exponentially increasing number of polls to avoid hammering
@@ -782,51 +812,61 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
     # ── Coordinator update ─────────────────────────────────────────────────
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Called by the coordinator at regular intervals."""
-        now = time.time()
+        """Called by the coordinator at regular intervals.
 
-        current_month = datetime.now(timezone.utc).month
-        if current_month != self.last_month:
-            _LOGGER.info(
-                "Month rolled over (%d → %d) — resetting monthly totals and reloading from InfluxDB",
-                self.last_month, current_month,
-            )
-            self.monthly = {
-                user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-                for user in self.tracked_users
-            }
-            self._pending = {
-                user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-                for user in self.tracked_users
-            }
-            self._monthly_loaded = False
-            await self._async_load_monthly_data()
-            self.last_month = current_month
+        Fix 7 — concurrent guard: if a previous poll is still running (e.g.
+        InfluxDB is slow), skip this cycle rather than running two overlapping
+        updates which could cause double-writes.
+        """
+        if self._update_lock.locked():
+            _LOGGER.debug("Previous update still running — skipping this poll")
+            return self._get_data()
 
-        if self.failed_writes:
-            if self._retry_skip_remaining > 0:
-                self._retry_skip_remaining -= 1
-                _LOGGER.debug(
-                    "Retry backoff active — skipping retry this poll (%d polls remaining)",
-                    self._retry_skip_remaining,
+        async with self._update_lock:
+            now = time.time()
+
+            current_month = datetime.now(timezone.utc).month
+            if current_month != self.last_month:
+                _LOGGER.info(
+                    "Month rolled over (%d → %d) — resetting monthly totals and reloading from InfluxDB",
+                    self.last_month, current_month,
                 )
+                self.monthly = {
+                    user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+                    for user in self.tracked_users
+                }
+                self._pending = {
+                    user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+                    for user in self.tracked_users
+                }
+                self._monthly_loaded = False
+                await self._async_load_monthly_data()
+                self.last_month = current_month
+
+            if self.failed_writes:
+                if self._retry_skip_remaining > 0:
+                    self._retry_skip_remaining -= 1
+                    _LOGGER.debug(
+                        "Retry backoff active — skipping retry this poll (%d polls remaining)",
+                        self._retry_skip_remaining,
+                    )
+                else:
+                    await self._retry_failed_writes()
+
+            if self._monthly_loaded:
+                await self._calculate_deltas(now)
+                self.last_time = now
             else:
-                await self._retry_failed_writes()
+                _LOGGER.debug("Monthly data not yet loaded — skipping InfluxDB write this poll")
 
-        if self._monthly_loaded:
-            await self._calculate_deltas(now)
-            self.last_time = now
-        else:
-            _LOGGER.debug("Monthly data not yet loaded — skipping InfluxDB write this poll")
+            try:
+                nm = self.hass.data.get(DOMAIN, {}).get("notification_manager")
+                if nm:
+                    await nm.async_evaluate(self)
+            except Exception as err:
+                _LOGGER.warning("Notification evaluation error: %s", err)
 
-        try:
-            nm = self.hass.data.get(DOMAIN, {}).get("notification_manager")
-            if nm:
-                await nm.async_evaluate(self)
-        except Exception as err:
-            _LOGGER.warning("Notification evaluation error: %s", err)
-
-        return self._get_data()
+            return self._get_data()
 
     # ── State change handling ──────────────────────────────────────────────
 
@@ -907,6 +947,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     self.hass.async_create_task(_store.async_flush_session())
             else:
                 self._idle_since = now
+                self.last_power = 0.0  # Reset stale power reading on logout
                 _store = self.hass.data.get(DOMAIN, {}).get("store")
                 if _store:
                     self.hass.async_create_task(_store.async_clear_session())
@@ -987,8 +1028,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
     ) -> None:
         """Build line-protocol point and write to InfluxDB. Buffers on failure."""
         timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+        escaped_user = _escape_influx_tag(self.current_user)
         point = (
-            f"{MEASUREMENT},user={self.current_user} "
+            f"{MEASUREMENT},user={escaped_user} "
             f"power={power},time_delta={time_delta},"
             f"energy_delta={energy_delta},cost_delta={cost_delta} "
             f"{timestamp_ns}"
@@ -1111,8 +1153,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         immediately so the correction is reflected in the panel without
         waiting for the next poll or a full integration reload.
         """
+        escaped_user = _escape_influx_tag(user)
         point = (
-            f"{MEASUREMENT},user={user},source=manual "
+            f"{MEASUREMENT},user={escaped_user},source=manual "
             f"power=0,time_delta={time_delta},"
             f"energy_delta={energy_delta},cost_delta={cost_delta} "
             f"{timestamp_ns}"
