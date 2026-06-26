@@ -64,7 +64,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._hass = h;
     this._isDark = h.themes?.darkMode ?? (window.matchMedia?.("(prefers-color-scheme:dark)").matches ?? false);
     if (first) this._load();
-    const wattEntity = "sensor.gamer_pc_power_monitor_current_consumption";
+    const wattEntity = this._config?.watt_entity || "sensor.gamer_pc_power_monitor_current_consumption";
     const st = h.states?.[wattEntity];
     const raw = st ? parseFloat(st.state) : null;
     this._watt = raw && !isNaN(raw) ? raw : null;
@@ -1465,12 +1465,13 @@ class PcUserStatisticsPanel extends HTMLElement {
     const bufOk=(h?.buffer_size??0)===0;
     const monthlyOk=h?.monthly_loaded!==false;
     const flushOk=h?.last_flush_age_s==null||h.last_flush_age_s<120;
+    const timerOk=h?.flush_timer_active!==false;
     const influxOk=(h?.write_age_s!=null&&h.write_age_s<300)||!h?.acc_time;
     const snapshotOk=h?.snapshot_age_s==null||h.snapshot_age_s<300;
-    const allOk=bufOk&&monthlyOk&&flushOk;
-    const statusClass=allOk?"ok":(!bufOk||!monthlyOk)?"err":"warn";
-    const statusIcon=allOk?"✅":(!bufOk||!monthlyOk)?"❌":"⚠️";
-    const statusLabel=allOk?"Alt OK — systemet kører normalt":!monthlyOk?"Monthly data ikke indlæst":`${h?.buffer_size} writes i buffer`;
+    const allOk=bufOk&&monthlyOk&&flushOk&&timerOk;
+    const statusClass=allOk?"ok":(!bufOk||!monthlyOk||!timerOk)?"err":"warn";
+    const statusIcon=allOk?"✅":(!bufOk||!monthlyOk||!timerOk)?"❌":"⚠️";
+    const statusLabel=allOk?"Alt OK — systemet kører normalt":!monthlyOk?"Monthly data ikke indlæst":!timerOk?"Flush-timer inaktiv — session-data risikerer tab":`${h?.buffer_size} writes i buffer`;
 
     const metrics=[
       { icon:h?.current_user?"🎮":"💤", val:h?.current_user?h.current_user.charAt(0).toUpperCase()+h.current_user.slice(1):"Ingen",
@@ -1481,6 +1482,8 @@ class PcUserStatisticsPanel extends HTMLElement {
         lbl:"Write buffer", desc:"Fejlede InfluxDB writes der venter på retry", cls:bufOk?"ok":"err" },
       { icon:flushOk?"✅":"⚠️", val:this._fmtAge(h?.last_flush_age_s),
         lbl:"Session flush", desc:"Periodisk snapshot til disk (hvert 60s)", cls:flushOk?"ok":"warn" },
+      { icon:timerOk?"✅":"❌", val:timerOk?`Aktiv (${h?.flush_interval_s??60}s)`:"INAKTIV",
+        lbl:"Flush-timer", desc:"Backup-timer kører i baggrunden", cls:timerOk?"ok":"err" },
       { icon:influxOk?"✅":"⏳", val:this._fmtAge(h?.write_age_s),
         lbl:"Seneste InfluxDB write", desc:"Hvornår data sidst blev skrevet", cls:influxOk?"ok":"warn" },
       { icon:snapshotOk?"✅":"⚠️", val:this._fmtAge(h?.snapshot_age_s),
