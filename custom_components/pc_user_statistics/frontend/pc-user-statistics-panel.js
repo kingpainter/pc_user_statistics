@@ -494,6 +494,7 @@ class PcUserStatisticsPanel extends HTMLElement {
 
     /* Statistik */
     .statistik-layout { display:grid; grid-template-columns:1fr 260px; gap:20px; }
+    .statistik-donut-mobile { display:none; }
     .user-monthly-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:10px; margin-bottom:10px; }
     .user-month-card { background:var(--bg2); border-radius:12px; border:1px solid var(--div); padding:14px; position:relative; }
     .user-month-card.is-active { border-color:var(--accent); background:rgba(139,92,246,.04); }
@@ -788,6 +789,8 @@ class PcUserStatisticsPanel extends HTMLElement {
       .panel-topbar { padding:12px 16px 0; }
       .panel-scroll { padding:12px 16px 32px; }
       .statistik-layout { grid-template-columns:1fr; }
+      .statistik-right { display:none; }
+      .statistik-donut-mobile { display:flex; flex-direction:column; align-items:center; gap:8px; margin-bottom:16px; }
       .live-card { flex-direction:column; }
       .tab .tab-label { display:none; }
       .health-grid { grid-template-columns:1fr 1fr; }
@@ -893,7 +896,16 @@ class PcUserStatisticsPanel extends HTMLElement {
         <div class="live-idle">
           <div class="live-idle-icon">💤</div>
           <div class="live-idle-text">PC er klar — ingen aktiv session</div>
-          <div class="live-idle-sub">Sidst set: ${this._stats?.monthly ? Object.values(this._stats.monthly).some(m=>m.time>0) ? "data tilgængeligt i Statistik" : "ingen data denne måned" : "—"}</div>
+          <div class="live-idle-sub">${(()=>{
+            const totals=Object.values(this._stats?.monthly||{});
+            const anyData=totals.some(m=>m.time>0);
+            if (!anyData) return "Ingen sessioner denne måned endnu";
+            const lastUser=Object.entries(this._stats?.monthly||{})
+              .sort((a,b)=>(b[1].time||0)-(a[1].time||0))[0];
+            return lastUser
+              ?`${lastUser[0].charAt(0).toUpperCase()+lastUser[0].slice(1)} ledte med ${this._fmtTime(lastUser[1].time)} denne måned`
+              :"Se Statistik-tab for månedsoversigt";
+          })()}</div>
         </div>
         ${hasBars ? `
           <div class="section-title" style="margin-top:8px">PC Status</div>
@@ -971,6 +983,10 @@ class PcUserStatisticsPanel extends HTMLElement {
 
     return `
       ${loadingBanner}
+      <div class="statistik-donut-mobile">
+        <div class="section-title" style="margin:0 0 8px">Fordeling</div>
+        ${this._donutSVG(users, monthly)}
+      </div>
       <div class="statistik-layout">
         <div class="statistik-left">
           <div class="section-title">Månedlige totaler</div>
@@ -1115,7 +1131,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     return `
       <div class="section-title">📱 Modtagerenheder</div>
       <div class="device-section">${devRows}</div>
-      <div class="section-title">⭐ Premade regler</div>
+      <div class="section-title" style="margin-top:24px">⭐ Premade regler</div>
       <div class="rules-list">${premade.join("")}</div>
       <div class="section-title-row">
         <span class="section-title" style="margin:0">✏️ Egne regler</span>
