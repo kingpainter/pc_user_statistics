@@ -470,6 +470,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     .live-stat-lbl  { font-size:11px; color:var(--sub); }
     .live-stat.active .live-stat-val { position:relative; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes pulse-dot { 0%,100%{opacity:1} 50%{opacity:.3} }
     .loading-spinner { display:inline-block; width:18px; height:18px; border:2px solid var(--div);
       border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite;
       flex-shrink:0; }
@@ -1233,7 +1234,17 @@ class PcUserStatisticsPanel extends HTMLElement {
 
   // ── History tab — with today marker ──────────────────────────
   _historyHTML() {
-    if (!this._history) return `<div class="empty-state">Indlæser historik fra InfluxDB...</div>`;
+    if (!this._history) return `
+      <div class="loading-banner" style="flex-direction:column;align-items:flex-start;gap:12px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="loading-spinner"></div>
+          <span>Indlæser historik fra InfluxDB...</span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;width:100%">
+          ${["85%","60%","75%","45%","90%"].map(w=>`
+          <div style="height:8px;background:var(--bg3);border-radius:4px;width:${w};opacity:.5"></div>`).join("")}
+        </div>
+      </div>`;
     const { days, users, series }=this._history;
     const m=this._histMetric;
     const metricBtns=[["time","⏱️ Tid"],["energy","⚡ Energi"],["cost","💰 Pris"]]
