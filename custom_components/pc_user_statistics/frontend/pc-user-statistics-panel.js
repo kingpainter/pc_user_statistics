@@ -1,6 +1,27 @@
 // PC User Statistics Panel
-// Version: 3.2.0 — Vanilla JS (no imports)
-// Last Updated: June 26, 2026
+// Version: 3.6.0 — Vanilla JS (no imports)
+// Last Updated: July 17, 2026
+//
+// Changes in 3.6.0:
+//   NEW: "Prissensor" health metric on Admin tab — shows whether the price
+//        sensor is currently OK, or whether the coordinator has fallen back
+//        to a cached price (price_fallback_count / price_entity_ok / last_valid_price
+//        from ws_get_health, backend __init__.py 2.13.0). Makes a previously
+//        silent price-sensor outage visible instead of just showing 0 kr.
+//
+// Changes in 3.5.0:
+//   NEW: "Kr/kWh" metric i Historik-tab — 4. valgmulighed ud over Tid/Energi/Pris.
+//        Viser cost/energy pr. dag/bruger, så man kan se om en dyr dag skyldes
+//        mere spilletid eller dyrere strøm. Måneds-/ugetotaler bruger vægtet
+//        gennemsnit (sum cost / sum energy) i stedet for naiv sum af rater.
+//
+// Changes in 3.4.0:
+//   NEW: "Gns. kr/time" på hvert brugerkort i Statistik-tab — cost/(time/3600),
+//        viser om nogen "spiller dyrt" ift. bare meget spilletid.
+//
+// Changes in 3.3.0:
+//   NEW: "Kr/time lige nu" stat card on Live tab — beregnes fra live watt-forbrug
+//        × price_entity (kr/kWh), læst client-side ligesom watt_entity.
 //
 // Changes in 3.2.0:
 //   FIX 1: watt-entity læses fra this._config?.watt_entity i stedet for hardcodet
@@ -60,6 +81,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     this._newRule     = this._emptyRule();
     this._interval    = null;
     this._watt        = null;
+    this._price       = null;
     this._gaugeStates = { gauge1:null, gauge2:null, gauge3:null, gauge4:null, gauge5:null };
     this._errCount    = 0;
     this._isDark      = false;
@@ -84,6 +106,10 @@ class PcUserStatisticsPanel extends HTMLElement {
     const st = h.states?.[wattEntity];
     const raw = st ? parseFloat(st.state) : null;
     this._watt = raw && !isNaN(raw) ? raw : null;
+    const priceEntity = this._config?.price_entity;
+    const pst = priceEntity ? h.states?.[priceEntity] : null;
+    const praw = pst ? parseFloat(pst.state) : null;
+    this._price = praw && !isNaN(praw) ? praw : null;
     this._updateGaugeStates();
     if (this._tab === "live") this._updateBarsInPlace();
     this._updateWattDisplay();
@@ -195,6 +221,8 @@ class PcUserStatisticsPanel extends HTMLElement {
   _fmtTime(s)   { if (!s || s < 0) return "0t 0m"; return `${Math.floor(s/3600)}t ${Math.floor((s%3600)/60)}m`; }
   _fmtEnergy(k) { return k ? k.toFixed(3).replace(".",",")+" kWh" : "0,000 kWh"; }
   _fmtCost(d)   { return d ? d.toFixed(2).replace(".",",")+" kr"  : "0,00 kr"; }
+  _fmtRate(r)   { return r != null ? r.toFixed(2).replace(".",",")+" kr/t" : "—"; }
+  _fmtCostPerKwh(r) { return r ? r.toFixed(2).replace(".",",")+" kr/kWh" : "—"; }
   _fmtAge(s)    {
     if (s == null) return "aldrig";
     if (s < 60)   return `${s}s siden`;
@@ -232,6 +260,15 @@ class PcUserStatisticsPanel extends HTMLElement {
   }
   _esc(s) {
     return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }
+  _histValue(series, u, day, metric) {
+    if (metric === "rate") {
+      const rec = series[u]?.[day];
+      const energy = rec?.energy || 0;
+      const cost = rec?.cost || 0;
+      return energy > 0 ? cost / energy : 0;
+    }
+    return series[u]?.[day]?.[metric] || 0;
   }
 
   // ── Notification actions ──────────────────────────────────────
@@ -947,6 +984,12 @@ class PcUserStatisticsPanel extends HTMLElement {
             <div class="live-stat-val">${this._fmtCost(sd.acc_cost)}</div>
             <div class="live-stat-lbl">Sessionspris</div>
           </div>
+          ${(this._watt != null && this._price != null) ? `
+          <div class="live-stat">
+            <div class="live-stat-icon">📈</div>
+            <div class="live-stat-val">${this._fmtRate(this._watt / 1000 * this._price)}</div>
+            <div class="live-stat-lbl">Kr/time lige nu</div>
+          </div>` : ""}
         </div>
         ${hasBars ? `<div class="live-bars">${barsHTML}</div>` : ""}
         <div class="live-right">
@@ -981,6 +1024,7 @@ class PcUserStatisticsPanel extends HTMLElement {
             <div class="user-stat"><span class="user-stat-label">Tid</span><span class="user-stat-value">${this._fmtTime(d.time)}</span></div>
             <div class="user-stat"><span class="user-stat-label">Energi</span><span class="user-stat-value">${this._fmtEnergy(d.energy)}</span></div>
             <div class="user-stat"><span class="user-stat-label">Pris</span><span class="user-stat-value">${this._fmtCost(d.cost)}</span></div>
+            <div class="user-stat"><span class="user-stat-label">Gns. kr/time</span><span class="user-stat-value">${this._fmtRate(d.time > 0 ? d.cost / (d.time / 3600) : null)}</span></div>
           </div>
         </div>`;
     }).join("");
@@ -1279,12 +1323,19 @@ class PcUserStatisticsPanel extends HTMLElement {
       </div>`;
     const { days, users, series }=this._history;
     const m=this._histMetric;
-    const metricBtns=[["time","⏱️ Tid"],["energy","⚡ Energi"],["cost","💰 Pris"]]
+    const metricBtns=[["time","⏱️ Tid"],["energy","⚡ Energi"],["cost","💰 Pris"],["rate","📈 Kr/kWh"]]
       .map(([id,label])=>`<button class="metric-btn${m===id?" active":""}" data-metric="${id}">${label}</button>`).join("");
     const COLORS=["#8b5cf6","#f59e0b","#10b981","#ef4444","#6366f1"];
-    const fmtV=v=>m==="time"?this._fmtTime(v):m==="energy"?this._fmtEnergy(v):this._fmtCost(v);
+    const fmtV=v=>m==="time"?this._fmtTime(v):m==="energy"?this._fmtEnergy(v):m==="cost"?this._fmtCost(v):this._fmtCostPerKwh(v);
     const monthTotals=users.map((u,i)=>{
-      const tot=days.reduce((acc,d)=>acc+(series[u]?.[d]?.[m]||0),0);
+      let tot;
+      if (m==="rate") {
+        const totCost=days.reduce((acc,d)=>acc+(series[u]?.[d]?.cost||0),0);
+        const totEnergy=days.reduce((acc,d)=>acc+(series[u]?.[d]?.energy||0),0);
+        tot=totEnergy>0?totCost/totEnergy:null;
+      } else {
+        tot=days.reduce((acc,d)=>acc+(series[u]?.[d]?.[m]||0),0);
+      }
       return `<div class="month-total-card" style="border-top:3px solid ${COLORS[i%COLORS.length]}">
         <div class="month-total-name">${u}</div>
         <div class="month-total-val" style="color:${COLORS[i%COLORS.length]}">${fmtV(tot)}</div>
@@ -1312,10 +1363,10 @@ class PcUserStatisticsPanel extends HTMLElement {
     const barGW=cW/showDays.length;
     const barW=Math.max(Math.min(barGW/users.length-2,18),3);
     let maxVal=0;
-    for (const day of showDays) for (const u of users) { const v=series[u]?.[day]?.[metric]||0; if (v>maxVal) maxVal=v; }
+    for (const day of showDays) for (const u of users) { const v=this._histValue(series,u,day,metric); if (v>maxVal) maxVal=v; }
     if (!maxVal) return `<div class="empty-state small">Ingen data for valgt periode</div>`;
     const scale=v=>cH-(v/maxVal)*cH;
-    const fmtY=v=>metric==="time"?(v>=3600?(v/3600).toFixed(1)+"t":Math.round(v/60)+"m"):metric==="energy"?v.toFixed(2)+"kWh":v.toFixed(1)+"kr";
+    const fmtY=v=>metric==="time"?(v>=3600?(v/3600).toFixed(1)+"t":Math.round(v/60)+"m"):metric==="energy"?v.toFixed(2)+"kWh":metric==="cost"?v.toFixed(1)+"kr":v.toFixed(2)+"kr/kWh";
     const yLabels=[0,.25,.5,.75,1].map(f=>{
       const val=f*maxVal, y=PT+scale(val);
       return `<text x="${PL-4}" y="${y+4}" text-anchor="end" font-size="9" fill="var(--sub)">${fmtY(val)}</text>
@@ -1332,7 +1383,7 @@ class PcUserStatisticsPanel extends HTMLElement {
     const bars=showDays.map((day,di)=>{
       const gX=PL+di*barGW;
       const dayBars=users.map((u,ui)=>{
-        const val=series[u]?.[day]?.[metric]||0, bH=(val/maxVal)*cH;
+        const val=this._histValue(series,u,day,metric), bH=(val/maxVal)*cH;
         const x=gX+(barGW-users.length*(barW+2))/2+ui*(barW+2), y=PT+cH-bH;
         return `<rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW}" height="${bH.toFixed(1)}"
           fill="${COLORS[ui%COLORS.length]}" rx="2" opacity="${day===todayStr?"1":"0.85"}">
@@ -1355,11 +1406,18 @@ class PcUserStatisticsPanel extends HTMLElement {
   _weekSummaryHTML(days, users, series, metric) {
     const last7=days.slice(-7);
     if (!last7.length) return "";
-    const fmtV=v=>metric==="time"?this._fmtTime(v):metric==="energy"?this._fmtEnergy(v):this._fmtCost(v);
+    const fmtV=v=>metric==="time"?this._fmtTime(v):metric==="energy"?this._fmtEnergy(v):metric==="cost"?this._fmtCost(v):this._fmtCostPerKwh(v);
     const COLORS=["#8b5cf6","#f59e0b","#10b981","#ef4444","#6366f1"];
     const todayStr=new Date().toISOString().slice(0,10);
     const totals=users.map((u,i)=>{
-      const tot=last7.reduce((acc,d)=>acc+(series[u]?.[d]?.[metric]||0),0);
+      let tot;
+      if (metric === "rate") {
+        const c=last7.reduce((acc,d)=>acc+(series[u]?.[d]?.cost||0),0);
+        const e=last7.reduce((acc,d)=>acc+(series[u]?.[d]?.energy||0),0);
+        tot = e>0 ? c/e : null;
+      } else {
+        tot=last7.reduce((acc,d)=>acc+(series[u]?.[d]?.[metric]||0),0);
+      }
       return `<div class="week-user-card">
         <div class="avatar" style="background:${COLORS[i%COLORS.length]}">${u[0].toUpperCase()}</div>
         <div class="week-user-info">
@@ -1374,8 +1432,8 @@ class PcUserStatisticsPanel extends HTMLElement {
     const rows=last7.map(d=>{
       const isToday=d===todayStr;
       const cells=users.map((u,i)=>{
-        const v=series[u]?.[d]?.[metric]||0;
-        const barPct=Math.round((v/(Math.max(...users.map(u2=>series[u2]?.[d]?.[metric]||0))||1))*100);
+        const v=this._histValue(series,u,d,metric);
+        const barPct=Math.round((v/(Math.max(...users.map(u2=>this._histValue(series,u2,d,metric)))||1))*100);
         return `<td><div class="day-bar-bg"><div class="day-bar-fill" style="width:${barPct}%;background:${COLORS[i%COLORS.length]}"></div></div>
           <div class="day-val">${fmtV(v)}</div></td>`;
       }).join("");
@@ -1517,6 +1575,9 @@ class PcUserStatisticsPanel extends HTMLElement {
     const timerOk=h?.flush_timer_active!==false;
     const influxOk=(h?.write_age_s!=null&&h.write_age_s<300)||!h?.acc_time;
     const snapshotOk=h?.snapshot_age_s==null||h.snapshot_age_s<300;
+    const priceOk=h?.price_entity_ok!==false;
+    const priceFallbackCount=h?.price_fallback_count??0;
+    const priceCls=!priceOk?"err":(priceFallbackCount>0?"warn":"ok");
     const allOk=bufOk&&monthlyOk&&flushOk&&timerOk;
     const statusClass=allOk?"ok":(!bufOk||!monthlyOk||!timerOk)?"err":"warn";
     const statusIcon=allOk?"✅":(!bufOk||!monthlyOk||!timerOk)?"❌":"⚠️";
@@ -1537,6 +1598,11 @@ class PcUserStatisticsPanel extends HTMLElement {
         lbl:"Seneste InfluxDB write", desc:"Hvornår data sidst blev skrevet", cls:influxOk?"ok":"warn" },
       { icon:snapshotOk?"✅":"⚠️", val:this._fmtAge(h?.snapshot_age_s),
         lbl:"Snapshot-alder", desc:"Alder på det gemte session-snapshot", cls:snapshotOk?"ok":"warn" },
+      { icon:priceCls==="ok"?"✅":priceCls==="warn"?"⚠️":"❌",
+        val:!priceOk
+          ? `Fallback (${h?.last_valid_price!=null?this._fmtCostPerKwh(h.last_valid_price):"—"})`
+          : (priceFallbackCount>0?`OK (${priceFallbackCount}× fallback denne måned)`:"OK"),
+        lbl:"Prissensor", desc:"Live spotpris — falder tilbage til seneste kendte pris i stedet for 0 kr ved udfald", cls:priceCls },
     ];
 
     const metricsHTML=metrics.map(m=>`

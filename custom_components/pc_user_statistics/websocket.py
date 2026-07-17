@@ -1,7 +1,20 @@
 # File Name: websocket.py
-# Version: 3.3.0
+# Version: 3.5.0
 # Description: WebSocket API for the PC User Statistics panel.
-# Last Updated: June 26, 2026
+# Last Updated: July 17, 2026
+#
+# Changes in 3.5.0:
+#   FIX: _query_history's InfluxDB GROUP BY time(1d) now explicitly uses
+#        tz('Europe/Copenhagen') instead of defaulting to UTC calendar days.
+#        Without it, the UTC day boundary falls at 02:00 local time (CEST),
+#        so any session between local midnight and 02:00 was silently counted
+#        on the wrong day in the Historik tab.
+#
+# Changes in 3.4.0:
+#   NEW: ws_get_health exposes price_fallback_count, last_valid_price, and
+#        price_entity_ok — lets the Admin tab show whether the price sensor
+#        has been falling back to a cached price (see coordinator __init__.py
+#        2.13.0 _get_price()), instead of that being invisible.
 #
 # Changes in 3.3.0:
 #   FIX 6: _query_history now reuses coordinator._http_session (the persistent
@@ -210,6 +223,10 @@ def ws_get_health(hass, connection, msg):
             "consec_failures":   consec_failures,
             # Monthly data
             "monthly_loaded":    coordinator._monthly_loaded,
+            # Price fallback
+            "price_fallback_count": getattr(coordinator, "_price_fallback_count", 0),
+            "last_valid_price":     getattr(coordinator, "_last_valid_price", 0.0),
+            "price_entity_ok":      coordinator._is_price_entity_ok(),
         })
     except Exception as err:
         connection.send_error(msg["id"], "unknown_error", str(err))
@@ -505,7 +522,7 @@ async def _query_history(coordinator, days: int) -> dict:
         f'SUM("cost_delta") AS "cost" '
         f'FROM pc_usage '
         f'WHERE time >= \'{start}\' '
-        f'GROUP BY time(1d), "user" fill(0)'
+        f'GROUP BY time(1d), "user" fill(0) tz(\'Europe/Copenhagen\')'
     )
 
     try:

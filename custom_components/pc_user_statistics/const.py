@@ -1,13 +1,13 @@
 # File Name: const.py
-# Version: 2.12.1
+# Version: 2.14.0
 # Description: Constants for the PC User Statistics integration.
-# Last Updated: June 26, 2026
+# Last Updated: July 17, 2026
 
 from typing import Final
 
 # Integration metadata
 DOMAIN: Final = "pc_user_statistics"
-__version__: Final = "2.12.1"
+__version__: Final = "2.14.0"
 
 # Device identifiers
 HUB_DEVICE_ID: Final = "statistics_hub"
@@ -50,7 +50,16 @@ WRITE_THRESHOLD: Final = 60  # Write to InfluxDB after this many seconds
 
 # InfluxDB write buffer (for failed writes)
 MAX_BUFFERED_WRITES: Final = 100  # Max points to buffer (FIFO, oldest dropped when full)
-MAX_RETRY_ATTEMPTS: Final = 3     # Max retry attempts per buffered point
+MAX_RETRY_ATTEMPTS: Final = 20    # Max retry attempts per buffered point — raised from 3.
+                                   # 3 attempts meant a point was silently dropped within
+                                   # minutes of a sustained InfluxDB outage, long before the
+                                   # 100-point FIFO cap ever mattered. The FIFO cap above is
+                                   # now the real backstop; this just avoids retrying a
+                                   # genuinely corrupt point forever.
+
+# Price fallback — how often (seconds) to re-log a warning while the price
+# sensor stays unavailable/unknown, so a prolonged outage doesn't spam the log
+PRICE_FALLBACK_LOG_INTERVAL: Final = 300
 
 # Sensor configuration for hub and user sensors
 # Format: {sensor_key: (name_key, icon, device_class, state_class, unit, suggested_display_precision)}

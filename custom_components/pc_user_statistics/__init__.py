@@ -1,7 +1,44 @@
 # File Name: __init__.py
-# Version: 2.12.1
+# Version: 2.14.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: June 26, 2026
+# Last Updated: July 17, 2026
+#
+# Changes in 2.14.0:
+#   NEW: Monthly baseline protection. _async_load_monthly_data() previously
+#        overwrote self.monthly unconditionally with whatever InfluxDB's SUM
+#        query returned — on EVERY coordinator restart/reload (HA restart,
+#        or an integration reload triggered by any config save). If InfluxDB
+#        was missing recent writes at that exact moment (e.g. stuck in the
+#        RAM-only failed_writes buffer during an outage), the fresh sum could
+#        be LOWER than what had already been tracked and shown — silently
+#        erasing real, already-counted playtime/energy/cost. Confirmed in
+#        production: recorder's own history for sensor.statistics_sebastian_duration
+#        showed the raw monthly-seconds value drop mid-month (no month rollover)
+#        at least 4 times in July, losing ~10.8 hours of tracked time total.
+#        Fix: a monthly baseline (self._persisted_monthly_baseline) is now
+#        persisted to the config store (store.py 2.11.0) on every periodic
+#        flush, after every successful InfluxDB load, and at shutdown.
+#        _async_load_monthly_data() now takes max(InfluxDB sum, baseline) per
+#        user/metric — it can only go up, never down — and falls back to the
+#        baseline entirely (instead of resetting to 0) if all retries fail.
+#        The baseline is correctly cleared at genuine month rollover so a new
+#        month isn't inflated by last month's numbers.
+#        MAX_RETRY_ATTEMPTS raised 3 → 20 (const.py) so individual write
+#        points aren't silently dropped within minutes of an InfluxDB outage.
+#
+# Changes in 2.13.0:
+#   NEW: Robust price fallback. _get_price() previously defaulted to 0.0
+#        DKK/kWh whenever the price sensor was unavailable/unknown, silently
+#        zeroing cost for that period while time/energy kept accumulating
+#        correctly. It now caches the last known valid price and falls back
+#        to that instead of 0.0 — only 0.0 if no valid price has ever been
+#        read (e.g. right after HA startup). Fallback usage is counted
+#        (_price_fallback_count, reset monthly) and rate-limited-logged
+#        (PRICE_FALLBACK_LOG_INTERVAL) so a sensor outage is visible instead
+#        of silent. New fields exposed via _get_data()/ws_get_health:
+#        price_fallback_count, last_valid_price, price_entity_ok.
+#        The fallback cache is also persisted in the session snapshot
+#        (store.py 2.10.0) so it survives a HA restart.
 #
 # Changes in 2.12.1:
 #   FIX 1: diagnostics.py uses entry.runtime_data (done in diagnostics.py)
@@ -154,6 +191,7 @@ from .const import (
     WRITE_THRESHOLD,
     MAX_BUFFERED_WRITES,
     MAX_RETRY_ATTEMPTS,
+    PRICE_FALLBACK_LOG_INTERVAL,
     CONF_USER_MAPPINGS,
     CONF_TRACKED_USERS,
     DEFAULT_USER_MAP,
@@ -242,6 +280,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             store.async_load(),
         )
 
+        # v2.14.0 — wire up direct store reference and restore the monthly
+        # baseline floor BEFORE _async_load_monthly_data() ever runs, so the
+        # very first load already has something to protect against.
+        coordinator._store = store
+        coordinator._persisted_monthly_baseline = store.get_monthly_baseline()
+
         await coordinator.async_config_entry_first_refresh()
 
         # Fix 1A: expose coordinator via entry.runtime_data — the modern HA
@@ -272,6 +316,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Start periodic session flush — ensures session reaches disk every 60s
         # regardless of InfluxDB availability.
         coordinator._schedule_session_flush()
+
+        # v2.14.0 — monthly data load is scheduled here (not in __init__) so it
+        # only runs after coordinator._store and _persisted_monthly_baseline are
+        # wired up above. Scheduling it from __init__ would race against that.
+        hass.async_create_task(coordinator._async_load_monthly_data())
 
         # Read the current user sensor state at startup.
         # async_track_state_change_event only fires on *future* changes — if HA restarts
@@ -459,10 +508,30 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self._retry_skip_count: int = 0
         self._retry_skip_remaining: int = 0
 
-        # Load monthly data in the background — does NOT block coordinator init
-        hass.async_create_task(self._async_load_monthly_data())
-        # _async_restore_session is called explicitly from async_setup_entry
-        # with the store instance — avoids timing dependency on hass.data
+        # ── Price fallback cache (v2.13.0) ──────────────────────────────────
+        # _get_price() falls back to _last_valid_price instead of 0.0 when the
+        # price sensor is unavailable/unknown. _price_fallback_count is reset
+        # every month rollover; _last_price_warning_time rate-limits the log
+        # warning so a prolonged sensor outage doesn't spam the log every 60s.
+        self._last_valid_price: float = 0.0
+        self._last_valid_price_time: float = 0.0
+        self._price_fallback_count: int = 0
+        self._last_price_warning_time: float = 0.0
+
+        # ── Monthly baseline protection (v2.14.0) ─────────────────────
+        # Direct reference to the NotificationStore, set by async_setup_entry
+        # right after both are created. Used to persist/restore a "floor" for
+        # monthly totals so _async_load_monthly_data() can never show LESS
+        # than what was already tracked (e.g. after a restart during an
+        # InfluxDB outage that left recent writes stuck in the RAM buffer).
+        self._store = None
+        self._persisted_monthly_baseline: dict[str, dict[str, float]] = {}
+
+        # NOTE: _async_load_monthly_data() is intentionally NOT scheduled here.
+        # It's scheduled explicitly by async_setup_entry, AFTER _store and
+        # _persisted_monthly_baseline are wired up above — scheduling it here
+        # (before either exists) would race against that wiring and the very
+        # first load would run with no baseline to protect against.
 
         _LOGGER.debug("PCStatisticsCoordinator initialized (entry: %s)", config_entry.entry_id)
 
@@ -524,6 +593,14 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         if self._session_flush_cancel is not None:
             self._session_flush_cancel()
             self._session_flush_cancel = None
+
+        # v2.14.0 — persist monthly baseline on shutdown too, independent of
+        # whether a session is active, so a restart right after shutdown has
+        # the freshest possible floor to protect against.
+        if self._store is not None and self._monthly_loaded:
+            self._store.save_monthly_baseline_in_memory(self.monthly)
+            await self._store.async_flush_monthly_baseline()
+
         # Snapshot Microsoft screen_time before shutdown so _async_restore_session
         # can compute the gap delta on next startup.
         if self.current_user:
@@ -539,6 +616,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                         time.time(),
                         ms_screen_time=ms_min,
                         ms_screen_time_date=ms_date,
+                        last_valid_price=self._last_valid_price,
+                        last_valid_price_time=self._last_valid_price_time,
                     )
                     # await directly — async_create_task is unreliable during shutdown
                     await _store.async_flush_session()
@@ -588,7 +667,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self._session_flush_cancel = async_call_later(self.hass, 60, _flush_callback)
 
     async def _async_periodic_flush(self) -> None:
-        """Flush session snapshot to disk and reschedule next flush.
+        """Flush session snapshot and monthly baseline to disk, reschedule next flush.
 
         Fix 4 — shutdown race guard: _unloaded is checked both at entry and
         after the async_flush_session() call. This prevents a race where
@@ -597,6 +676,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         """
         if self._unloaded:
             return
+
+        # v2.14.0 — persist the monthly baseline every flush cycle, regardless
+        # of whether a session is currently active. This is what lets a future
+        # restart/reload know the last known-good totals instead of trusting
+        # a fresh InfluxDB sum blindly (see _async_load_monthly_data()).
+        if self._store is not None and self._monthly_loaded:
+            self._store.save_monthly_baseline_in_memory(self.monthly)
+            await self._store.async_flush_monthly_baseline()
+
         if not self.current_user:
             # Reschedule even if no active user — ensures we pick up next login
             self._schedule_session_flush()
@@ -612,6 +700,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 time.time(),
                 ms_screen_time=ms_min,
                 ms_screen_time_date=ms_date,
+                last_valid_price=self._last_valid_price,
+                last_valid_price_time=self._last_valid_price_time,
             )
             await _store.async_flush_session()
             self._last_session_flush = time.time()
@@ -631,6 +721,14 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         Retries up to 3 times with exponential backoff if InfluxDB is not yet
         ready at HA startup (common when InfluxDB add-on starts after HA).
+
+        v2.14.0: the freshly-fetched InfluxDB sum is never allowed to result
+        in a LOWER total than self._persisted_monthly_baseline (loaded from
+        disk at startup, updated on every periodic flush). This protects
+        against silently erasing already-tracked time/energy/cost if InfluxDB
+        is missing recent writes at the exact moment a restart or integration
+        reload triggers this reload — which is exactly what was found to be
+        happening in production (see changelog).
         """
         now = datetime.now(timezone.utc)
         month_start = (
@@ -667,6 +765,25 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     for key, val in values.items():
                         new_monthly[user][key] = float(val or 0)
 
+            # v2.14.0 — floor: never let InfluxDB's sum show less than the
+            # last known-good baseline. A lower InfluxDB value at this point
+            # means InfluxDB is missing writes that were already tracked and
+            # displayed — not that the true total decreased.
+            baseline = self._persisted_monthly_baseline or {}
+            for user in self.tracked_users:
+                b = baseline.get(user, {})
+                for key in ("time", "energy", "cost"):
+                    floor_val = b.get(key, 0.0)
+                    if new_monthly[user][key] < floor_val:
+                        _LOGGER.warning(
+                            "Monthly %s for '%s' from InfluxDB (%.2f) is lower than the "
+                            "last known baseline (%.2f) — keeping the higher value. This "
+                            "usually means InfluxDB is missing recent writes (e.g. after "
+                            "an outage) rather than the true total having decreased.",
+                            key, user, new_monthly[user][key], floor_val,
+                        )
+                        new_monthly[user][key] = floor_val
+
             # Merge in any deltas accumulated before load completed
             for user in self.tracked_users:
                 pending = self._pending.get(user, {})
@@ -680,6 +797,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 "Monthly data loaded from InfluxDB: %s",
                 {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in self.monthly.items()},
             )
+
+            # Persist the freshly-reconciled totals as the new baseline right
+            # away, so an immediate follow-up restart has the freshest floor.
+            if self._store is not None:
+                self._store.save_monthly_baseline_in_memory(self.monthly)
+                await self._store.async_flush_monthly_baseline()
 
         except aiohttp.ClientError as err:
             max_retries = 3
@@ -698,11 +821,21 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     await self._async_load_monthly_data(retry=retry + 1)
                 self.hass.async_create_task(_retry())
             else:
+                baseline = self._persisted_monthly_baseline or {}
                 _LOGGER.error(
                     "Failed to load monthly data from InfluxDB after %d attempts: %s. "
-                    "Monthly totals will start from 0 and accumulate from now.",
+                    "Falling back to last known baseline instead of resetting to 0: %s",
                     max_retries, err,
+                    {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in baseline.items()} or "none available",
                 )
+                self.monthly = {
+                    user: {
+                        "time":   baseline.get(user, {}).get("time", 0.0),
+                        "energy": baseline.get(user, {}).get("energy", 0.0),
+                        "cost":   baseline.get(user, {}).get("cost", 0.0),
+                    }
+                    for user in self.tracked_users
+                }
                 self._monthly_loaded = True
 
         except Exception as err:
@@ -803,6 +936,22 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 saved_ms_date, today,
             )
 
+        # ── Price fallback cache restore (v2.13.0) ───────────────────
+        # Seed _last_valid_price from the snapshot so _get_price() has a sane
+        # fallback available immediately after restart, before the price sensor
+        # has reported for the first time in this session. Capped at 6 hours —
+        # older than that, a stale cached price is more likely to be wrong than
+        # useful, so we let it start fresh (0.0) instead.
+        saved_price = snapshot.get("last_valid_price")
+        saved_price_time = snapshot.get("last_valid_price_time")
+        if saved_price is not None and saved_price_time and (now - saved_price_time) < 6 * 3600:
+            self._last_valid_price = float(saved_price)
+            self._last_valid_price_time = float(saved_price_time)
+            _LOGGER.debug(
+                "Restored price fallback cache: %.2f kr/kWh (%.0fs old)",
+                self._last_valid_price, now - saved_price_time,
+            )
+
         _LOGGER.info(
             "Session restored after HA restart — user='%s' acc_time=%.0fs "
             "acc_energy=%.4fkWh acc_cost=%.4fDKK (snapshot age %.0fs)",
@@ -840,6 +989,15 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     for user in self.tracked_users
                 }
                 self._monthly_loaded = False
+                self._price_fallback_count = 0
+                # v2.14.0 — a new month starts fresh, so last month's baseline
+                # floor must NOT carry over (it would wrongly inflate the new
+                # month's totals via the max()-style floor in
+                # _async_load_monthly_data()).
+                self._persisted_monthly_baseline = {}
+                if self._store is not None:
+                    self._store.save_monthly_baseline_in_memory(self.monthly)
+                    await self._store.async_flush_monthly_baseline()
                 await self._async_load_monthly_data()
                 self.last_month = current_month
 
@@ -1013,9 +1171,60 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         return max(watt - device_power, 0.0)
 
     def _get_price(self) -> float:
-        """Current energy price in DKK/kWh."""
+        """Current energy price in DKK/kWh.
+
+        Falls back to the last known valid price if the price sensor is
+        temporarily unavailable/unknown/unparsable, instead of silently
+        treating the period as free (0.0 DKK/kWh) — which previously caused
+        cost to be undercounted while time/energy kept accumulating normally.
+        Only returns 0.0 if no valid price has ever been read (e.g. right
+        after HA startup, before the price sensor has reported for the
+        first time and no cached value was restored from the session
+        snapshot).
+
+        Fallback usage is counted (self._price_fallback_count, visible in the
+        Admin tab via ws_get_health) and a warning is logged at most once per
+        PRICE_FALLBACK_LOG_INTERVAL seconds, so a sensor outage is discoverable
+        instead of silent.
+        """
         price_state = self.hass.states.get(self._price_entity)
-        return safe_float_from_state(price_state, default=0.0, min_value=0.0)
+        if price_state is not None and price_state.state not in (
+            "unavailable", "unknown", "none", "",
+        ):
+            try:
+                value = float(price_state.state)
+            except (ValueError, TypeError):
+                value = None
+            if value is not None and value >= 0:
+                self._last_valid_price = value
+                self._last_valid_price_time = time.time()
+                return value
+
+        # Price sensor unavailable, unknown, or unparsable — fall back.
+        self._price_fallback_count += 1
+        now = time.time()
+        if now - self._last_price_warning_time > PRICE_FALLBACK_LOG_INTERVAL:
+            _LOGGER.warning(
+                "Price entity '%s' unavailable/invalid — using last known price "
+                "%.2f kr/kWh (fallback used %d time(s) this month)",
+                self._price_entity, self._last_valid_price, self._price_fallback_count,
+            )
+            self._last_price_warning_time = now
+        return self._last_valid_price
+
+    def _is_price_entity_ok(self) -> bool:
+        """Return True if the price entity currently holds a valid, parsable state.
+
+        Used by ws_get_health to show live price-sensor status on the Admin tab,
+        independent of whether a fallback happened to be used on the last delta.
+        """
+        state = self.hass.states.get(self._price_entity)
+        if state is None or state.state in ("unavailable", "unknown", "none", ""):
+            return False
+        try:
+            return float(state.state) >= 0
+        except (ValueError, TypeError):
+            return False
 
     # ── InfluxDB write ─────────────────────────────────────────────────────
 
@@ -1052,6 +1261,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     time.time(),
                     ms_screen_time=ms_min,
                     ms_screen_time_date=ms_date,
+                    last_valid_price=self._last_valid_price,
+                    last_valid_price_time=self._last_valid_price_time,
                 )
                 self.hass.async_create_task(_store.async_flush_session())
         else:
@@ -1068,6 +1279,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     time.time(),
                     ms_screen_time=ms_min,
                     ms_screen_time_date=ms_date,
+                    last_valid_price=self._last_valid_price,
+                    last_valid_price_time=self._last_valid_price_time,
                 )
                 self.hass.async_create_task(_store.async_flush_session())
 
@@ -1239,4 +1452,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             "acc_cost":       self.acc_cost,
             "monthly":        monthly_view,
             "monthly_loaded": self._monthly_loaded,
+            "price_fallback_count": self._price_fallback_count,
+            "last_valid_price":     self._last_valid_price,
+            "price_entity_ok":      self._is_price_entity_ok(),
         }

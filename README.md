@@ -1,6 +1,6 @@
 # PC User Statistics
 
-[![Version](https://img.shields.io/badge/version-2.11.0-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
+[![Version](https://img.shields.io/badge/version-2.14.0-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue.svg)](https://www.home-assistant.io/)
 [![Quality Scale](https://img.shields.io/badge/quality-silver%20→%20gold-gold.svg)](https://developers.home-assistant.io/docs/integration_quality_scale_index/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -14,9 +14,11 @@ A Home Assistant custom integration for tracking gaming PC usage statistics per 
 ### ✅ What It Does
 
 - **Multi-User Tracking**: Individual statistics per user, configurable via UI
-- **Live Session Monitoring**: Real-time power (watt gauge), time, and cost tracking
+- **Live Session Monitoring**: Real-time power (watt gauge), time, cost, and live kr/time tracking
+- **Cost Breakdown Views**: Average kr/time per user (Statistik tab) and kr/kWh comparison over time (Historik tab) — see whether a costly day comes from more playtime or a pricier electricity rate
+- **Robust Price Handling**: Falls back to the last known valid electricity price if the price sensor is temporarily unavailable, instead of silently counting that period as free — with an Admin tab health indicator showing fallback status
 - **Monthly Summaries**: Automated monthly statistics per user
-- **Historical Graphs**: Daily bar charts for the last 30 days per metric
+- **Historical Graphs**: Daily bar charts for the last 30 days per metric (time / energy / cost / kr-per-kWh)
 - **Leaderboard**: Monthly ranking with 🥇🥈🥉 medals
 - **Push Notifications**: Configurable rules with test and repeat support
 - **InfluxDB Integration**: Long-term data storage for historical analysis
@@ -239,6 +241,26 @@ The integration uses a **DataUpdateCoordinator** with a 60-second polling interv
 | **5+ consecutive failures** | RepairIssue raised in HA UI — visible under Settings → Repairs |
 
 Deltas (time, energy, cost) are only written to InfluxDB when a user is actively logged in and the power sensor reports a positive value.
+
+### Price Sensor Fallback
+
+If the configured electricity price sensor becomes temporarily `unavailable` or `unknown` (common with forecast-based price sensors around midnight rollovers or brief integration reloads), the integration no longer treats that period as free electricity. Instead, it falls back to the last known valid price:
+
+| Situation | Behavior |
+|-----------|----------|
+| Price sensor reports normally | Used directly, cached as "last known valid price" |
+| Price sensor unavailable/unknown/unparsable | Falls back to the last known valid price instead of 0.0 DKK/kWh |
+| No valid price has ever been read (e.g. right after HA startup) | Falls back to 0.0 DKK/kWh until the sensor reports |
+
+Fallback usage is counted per month and visible as a health metric ("Prissensor") on the **⚙️ Admin** tab, and a rate-limited warning (at most once per 5 minutes) is logged so a prolonged sensor outage is discoverable instead of silent. The fallback cache also survives a Home Assistant restart (persisted in the session snapshot, discarded if older than 6 hours).
+
+### Monthly Totals Baseline Protection
+
+Every coordinator restart (a full Home Assistant restart, or an integration reload triggered by any configuration save) re-fetches the current month's totals from InfluxDB via a `SUM()` query. If InfluxDB happened to be missing recent writes at that exact moment — for example because they were still sitting in the write-retry buffer during an outage — the fresh sum could come back lower than what had already been tracked and displayed, silently erasing real time/energy/cost from view.
+
+The integration now protects against this with a persisted baseline: monthly totals are saved to the config store every 60 seconds, after every successful InfluxDB load, and on shutdown. On the next load, InfluxDB's sum is only ever allowed to raise the total, never lower it — and if InfluxDB is completely unreachable after 3 retries, the integration falls back to the last known baseline instead of resetting to 0. The baseline is correctly cleared at the start of a new month.
+
+If you notice monthly totals that seem lower than expected, check the **📈 Historik** tab's daily breakdown against another independent source (e.g. Microsoft Family Safety screen time, if configured) — the **⚙️ Admin** tab's "Manuel korrektion" form can be used to add a one-off correction for a specific date if a gap is confirmed.
 
 ---
 

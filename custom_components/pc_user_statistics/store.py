@@ -1,7 +1,24 @@
 # File Name: store.py
-# Version: 2.9.1
+# Version: 2.11.0
 # Description: Persistent storage for notification rules using HA store (.storage).
-# Last Updated: June 26, 2026
+# Last Updated: July 17, 2026
+#
+# Changes in 2.11.0:
+#   NEW: Monthly baseline persistence — get_monthly_baseline(),
+#        save_monthly_baseline_in_memory(), async_flush_monthly_baseline().
+#        Stored in the CONFIG store (not the session store), so it survives
+#        a normal user logout — unlike session data, this must persist across
+#        the whole month regardless of who is currently logged in. Used by
+#        __init__.py _async_load_monthly_data() to guarantee monthly totals
+#        can never regress below the last known-good value, even if InfluxDB
+#        is missing recent writes at the moment of a restart/reload.
+#
+# Changes in 2.10.0:
+#   NEW: save_session_in_memory() accepts optional last_valid_price and
+#        last_valid_price_time — persisted in the session snapshot so a
+#        HA restart doesn't lose the price fallback cache (coordinator can
+#        resume with a known-good price instead of 0.0 kr/kWh immediately
+#        after startup, if the price sensor hasn't reported yet).
 #
 # Changes in 2.9.1:
 #   FIX: async_save_rule() and async_save_devices() now wrapped in try/except.
@@ -236,6 +253,38 @@ class NotificationStore:
         except Exception as err:
             _LOGGER.error("Failed to save devices to disk: %s", err)
 
+    # ── Monthly baseline (v2.14.0 protection) ─────────────────────────
+
+    def get_monthly_baseline(self) -> dict[str, dict[str, float]]:
+        """Return the last persisted monthly totals baseline.
+
+        Used by the coordinator's _async_load_monthly_data() as a floor:
+        a fresh InfluxDB sum is never allowed to show LESS than this,
+        protecting against permanently losing already-tracked time/energy/
+        cost if InfluxDB is missing recent writes at the exact moment a
+        restart or integration reload triggers a fresh load.
+
+        Stored in the CONFIG store (not the session store) so it survives
+        a normal user logout — the baseline must persist for the whole
+        month regardless of who is currently logged in.
+        """
+        return self._data.get("monthly_baseline", {})
+
+    def save_monthly_baseline_in_memory(self, monthly: dict[str, dict[str, float]]) -> None:
+        """Update the monthly baseline in RAM — no disk write.
+
+        Call async_flush_monthly_baseline() afterwards to persist.
+        """
+        self._data["monthly_baseline"] = monthly
+
+    async def async_flush_monthly_baseline(self) -> None:
+        """Persist the monthly baseline to the config store immediately."""
+        try:
+            await self._store.async_save(self._data)
+            _LOGGER.debug("Monthly baseline flushed to disk")
+        except Exception as err:
+            _LOGGER.error("Failed to flush monthly baseline to disk: %s", err)
+
     # ── Sent tracking (anti-spam) ────────────────────────────────────────────
 
     def get_last_sent(self, rule_id: str, user: str) -> float:
@@ -307,6 +356,8 @@ class NotificationStore:
         last_time: float,
         ms_screen_time: int | None = None,
         ms_screen_time_date: str | None = None,
+        last_valid_price: float | None = None,
+        last_valid_price_time: float | None = None,
     ) -> None:
         """Update session snapshot in RAM — no disk write.
 
@@ -315,6 +366,10 @@ class NotificationStore:
         ms_screen_time: Microsoft Family Safety screen_time in minutes at snapshot time.
         ms_screen_time_date: ISO date string (YYYY-MM-DD) the screen_time belongs to.
         Both are optional — only set when a Family Safety mapping exists for the user.
+
+        last_valid_price / last_valid_price_time: the coordinator's price fallback
+        cache (see __init__.py _get_price()). Persisted so a HA restart doesn't
+        reset the fallback to 0.0 kr/kWh before the price sensor next reports.
         """
         self._session_data = {
             "current_user": current_user,
@@ -325,6 +380,8 @@ class NotificationStore:
             "saved_at": time.time(),
             "ms_screen_time": ms_screen_time,
             "ms_screen_time_date": ms_screen_time_date,
+            "last_valid_price": last_valid_price,
+            "last_valid_price_time": last_valid_price_time,
         }
 
     async def async_flush_session(self) -> None:

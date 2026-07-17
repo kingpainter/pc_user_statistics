@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [2.14.0] - 2026-07-17
+
+### Fixed
+
+- **Kritisk: månedlige totaler kunne stille falde ved genstart/reload** (`__init__.py`, `store.py`, `const.py`):
+  - **Problem**: `_async_load_monthly_data()` overskrev `self.monthly` ubetinget med InfluxDB's SUM-forespørgsel — ved **enhver** coordinator-genstart (HA-genstart, eller integration-reload udløst af enhver konfigurations-gem). Hvis InfluxDB manglede nyligt skrevne punkter på det præcise tidspunkt (fx fordi de sad fast i den RAM-only `failed_writes`-bufferen under et udfald), blev den friske sum lavere end det der allerede var vist — og slettede dermed reel, allerede-talt spilletid/energi/pris stille fra visningen.
+  - **Bekræftet i produktion**: recorder's egen historik for `sensor.statistics_sebastian_duration` viste månedstallet falde midt i måneden (uden månedsskift) mindst 4 gange i juli. Sammenholdt med Microsoft Family Safety som uafhængigt facit viste det sig at **~43,5 timers spilletid for Sebastian alene i én uge** var forsvundet fra InfluxDB/panelet.
+  - **Fix**: Ny månedlig baseline (`self._persisted_monthly_baseline`) persisteres til config-storen (`store.py` — `get_monthly_baseline()`, `save_monthly_baseline_in_memory()`, `async_flush_monthly_baseline()`) hvert 60. sekund, efter hver vellykket InfluxDB-indlæsning, og ved shutdown. `_async_load_monthly_data()` tager nu `max(InfluxDB-sum, baseline)` per bruger/metrik — kan kun gå op, aldrig ned — og falder tilbage til baseline i stedet for at nulstille til 0, hvis alle 3 InfluxDB-forsøg fejler. Baseline nulstilles korrekt ved ægte månedsskift.
+  - `_async_load_monthly_data()` planlægges nu eksplicit fra `async_setup_entry` (efter `_store`/baseline er koblet på) i stedet for i `__init__` — fjerner et kapløb hvor den første indlæsning kunne køre før baseline var tilgængelig.
+
+- **`MAX_RETRY_ATTEMPTS` hævet 3 → 20** (`const.py`): fejlede InfluxDB-writes blev tidligere droppet permanent efter kun 3 forsøg — længe før det egentlige 100-punkts FIFO-loft nogensinde blev relevant. FIFO-loftet er nu den reelle grænse.
+
+- **Timezone-fix i Historik-forespørgslen** (`websocket.py` — `_query_history`): `GROUP BY time(1d)` brugte InfluxDB's UTC-standard i stedet for `Europe/Copenhagen`. Med sommertid (UTC+2) lå døgnskiftet kl. 02:00 lokal tid — sessioner mellem midnat og kl. 02 blev talt på den forkerte dag i Historik-tabben. Rettet med `tz('Europe/Copenhagen')`.
+
+### Data-korrektion
+
+- **Sebastians juli-data genskabt** via "Manuel korrektion" (`source=manual` InfluxDB-punkter) for 11.-16. juli, baseret på Microsoft Family Safety (enheds-specifikt for FLEMMING_GAMER) som uafhængigt facit for tid, og faktiske historiske spotpriser fra `sensor.energy_hub_elhub_price_total` (via recorder) for prisestimatet. Energi estimeret ud fra observeret gennemsnitsforbrug (~0,16 kW), da de oprindelige watt-målinger for de tabte perioder aldrig nåede InfluxDB. I alt genskabt: 2608 min (43t28m), 6,955 kWh, 12,42 kr.
+
+
+## [2.13.0] - 2026-07-17
+
+### Added
+
+- **Bedre forbrugsvisning — kr/time og kr/kWh** (`pc-user-statistics-panel.js` 3.2.0 → 3.5.0):
+  - **Live-tab**: nyt 4. stat-kort "Kr/time lige nu" — beregnes client-side som `(watt/1000) × pris_entity`, læst direkte fra HA state ligesom `watt_entity`. Vises kun når både watt og pris er tilgængelige.
+  - **Statistik-tab**: hvert brugerkort får nu en 4. linje "Gns. kr/time" (`cost / (time/3600)`), så man kan se om nogen "spiller dyrt" ift. bare meget spilletid.
+  - **Historik-tab**: ny 4. metric "Kr/kWh" i metric-selectoren ud over Tid/Energi/Pris. Viser om en dyr dag skyldes mere spilletid eller dyrere strøm. Måneds- og ugetotaler for denne metric bruger et vægtet gennemsnit (`sum(cost)/sum(energy)`) i stedet for en naiv sum af daglige rater, så tallet er matematisk korrekt.
+
+- **Robust prisfallback — luk hul der kunne give stille 0-kroner-perioder** (`const.py`, `__init__.py`, `store.py`, `websocket.py`, `pc-user-statistics-panel.js` 3.6.0):
+  - **Problem**: `_get_price()` returnerede tidligere `0.0` DKK/kWh når prissensoren (`price_entity`) var `unavailable`/`unknown`/uparsbar — tid og energi blev stadig talt korrekt, men den periodes omkostning forsvandt helt, uden log eller synlighed.
+  - **Fix**: `_get_price()` cacher nu seneste kendte gyldige pris og falder tilbage til den i stedet for 0.0. Kun 0.0 hvis der aldrig er set en gyldig pris (f.eks. lige efter HA-opstart).
+  - Fallback-brug tælles (`_price_fallback_count`, nulstilles ved månedsskift) og logges som en rate-limited advarsel (højst hvert 5. minut via ny `PRICE_FALLBACK_LOG_INTERVAL`-konstant), så et sensor-udfald er synligt i loggen i stedet for stille.
+  - Prisfallback-cachen (`last_valid_price` + `last_valid_price_time`) gemmes nu også i sessionssnapshottet (`store.py` `save_session_in_memory()`), så den overlever en HA-genstart — kasseres dog hvis den er ældre end 6 timer.
+  - Ny helper `_is_price_entity_ok()` på coordinatoren, brugt af `ws_get_health` til at eksponere `price_fallback_count`, `last_valid_price` og `price_entity_ok`.
+  - Ny "Prissensor"-health-metric på Admin-tabben: grøn ✅ ("OK"), gul ⚠️ ("OK (X× fallback denne måned)") eller rød ❌ ("Fallback (X,XX kr/kWh)") alt efter status.
+  - Fundet og løst som led i en sammenligning med `server_monitor`-integrationens omkostningsberegning (som bruger en fast gennemsnitspris i stedet for live spotpris — se commit-diskussion for baggrund).
+
+
 ## [2.11.0] - 2026-06-13
 
 ### Added
