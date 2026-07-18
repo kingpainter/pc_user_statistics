@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [2.15.0] - 2026-07-17
+
+### Fixed
+
+- **Statistik-tabbens MS Family Safety-sammenligning sammenlignede forkerte tidsvinduer** (`__init__.py`, `store.py`, `const.py`, `websocket.py`, `pc-user-statistics-panel.js`):
+  - **Problem**: "Skærmtid i dag"-widgeten sammenlignede Microsoft Family Safetys skærmtid *i dag* mod PC'ens *hele måneds*-total (`this._stats.monthly`) — begge labelet "i dag". Jo længere måneden skår frem, jo mere misvisende blev sammenligningen.
+  - **Fix**: Ny `self.daily`-tracker i coordinatoren, en fuldstændig sideordnet parallel til `self.monthly` — samme delta-akkumulering, samme InfluxDB-indlæsning med baseline-floor-beskyttelse (`_persisted_daily_baseline`), samme periodiske persistering og samme robusthed mod restart/reload-datatab som månedstrackeren fik i v2.14.0. Nulstilles ved lokal midnat i stedet for månedsskift. `panel.js` bruger nu `daily` i stedet for `monthly` til MS-sammenligningen.
+  - Ny `ws_get_stats`-felt: `daily` + `daily_loaded`.
+
+- **Måneds- og dags-skifte brugte UTC i stedet for lokal tid** (`__init__.py`, ny `LOCAL_TIMEZONE`-konstant i `const.py`):
+  - Samme klasse fejl som Historik-tabbens tz-fix (v3.5.0): UTC-døgnskifte falder kl. 02:00 dansk sommertid, ikke ved midnat — så måneds-/dags-rollover i coordinatoren kunne udløses op til 2 timer for sent.
+  - **Fix**: Måneds- og dags-skifte tjekkes nu via `Europe/Copenhagen`-lokaltid (`zoneinfo.ZoneInfo`). InfluxDB-forespørgslernes start-tidspunkt (både måned og dag) beregnes nu fra lokal midnat, konverteret til UTC, i stedet for UTC-midnat direkte.
+
+
 ## [2.14.0] - 2026-07-17
 
 ### Fixed

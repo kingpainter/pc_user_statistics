@@ -1,5 +1,5 @@
 # File Name: const.py
-# Version: 2.14.0
+# Version: 2.15.0
 # Description: Constants for the PC User Statistics integration.
 # Last Updated: July 17, 2026
 
@@ -7,7 +7,7 @@ from typing import Final
 
 # Integration metadata
 DOMAIN: Final = "pc_user_statistics"
-__version__: Final = "2.14.0"
+__version__: Final = "2.15.0"
 
 # Device identifiers
 HUB_DEVICE_ID: Final = "statistics_hub"
@@ -60,6 +60,12 @@ MAX_RETRY_ATTEMPTS: Final = 20    # Max retry attempts per buffered point — ra
 # Price fallback — how often (seconds) to re-log a warning while the price
 # sensor stays unavailable/unknown, so a prolonged outage doesn't spam the log
 PRICE_FALLBACK_LOG_INTERVAL: Final = 300
+
+# Local timezone used for calendar-day/month boundaries (daily reset, monthly
+# rollover, InfluxDB query windows). Using UTC for these caused month rollover
+# to fire up to 2 hours late in summer (CEST = UTC+2), and would cause the
+# same issue for a new "daily" tracker if left on UTC.
+LOCAL_TIMEZONE: Final = "Europe/Copenhagen"
 
 # Sensor configuration for hub and user sensors
 # Format: {sensor_key: (name_key, icon, device_class, state_class, unit, suggested_display_precision)}

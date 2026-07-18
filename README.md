@@ -1,6 +1,6 @@
 # PC User Statistics
 
-[![Version](https://img.shields.io/badge/version-2.14.0-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
+[![Version](https://img.shields.io/badge/version-2.15.0-blue.svg)](https://github.com/kingpainter/pc_user_statistics)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1+-blue.svg)](https://www.home-assistant.io/)
 [![Quality Scale](https://img.shields.io/badge/quality-silver%20→%20gold-gold.svg)](https://developers.home-assistant.io/docs/integration_quality_scale_index/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -261,6 +261,12 @@ Every coordinator restart (a full Home Assistant restart, or an integration relo
 The integration now protects against this with a persisted baseline: monthly totals are saved to the config store every 60 seconds, after every successful InfluxDB load, and on shutdown. On the next load, InfluxDB's sum is only ever allowed to raise the total, never lower it — and if InfluxDB is completely unreachable after 3 retries, the integration falls back to the last known baseline instead of resetting to 0. The baseline is correctly cleared at the start of a new month.
 
 If you notice monthly totals that seem lower than expected, check the **📈 Historik** tab's daily breakdown against another independent source (e.g. Microsoft Family Safety screen time, if configured) — the **⚙️ Admin** tab's "Manuel korrektion" form can be used to add a one-off correction for a specific date if a gap is confirmed.
+
+### Daily Totals & Local Timezone
+
+Alongside the monthly tracker, the integration also maintains a `daily` ("today") total per user — a full parallel to the monthly tracker with the same InfluxDB-load, baseline-floor protection, and periodic persistence. This powers a fair "today vs. today" comparison against Microsoft Family Safety's screen time on the **📊 Statistik** tab (previously this compared MS's daily figure against the PC's whole-month total by mistake).
+
+Both the monthly and daily rollover, and the InfluxDB query windows behind them, are computed in `Europe/Copenhagen` local time rather than UTC — using UTC directly would shift the rollover moment by up to 2 hours during CEST (summer time).
 
 ---
 

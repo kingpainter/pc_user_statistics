@@ -1,7 +1,13 @@
 # File Name: websocket.py
-# Version: 3.5.0
+# Version: 3.6.0
 # Description: WebSocket API for the PC User Statistics panel.
 # Last Updated: July 17, 2026
+#
+# Changes in 3.6.0:
+#   NEW: ws_get_stats now also returns `daily` and `daily_loaded` — the new
+#        "today" totals tracker from __init__.py 2.15.0. Used by panel.js's
+#        MS Family Safety comparison on the Statistik tab, which previously
+#        compared MS's daily figure against the PC's whole-month total.
 #
 # Changes in 3.5.0:
 #   FIX: _query_history's InfluxDB GROUP BY time(1d) now explicitly uses
@@ -110,9 +116,11 @@ def ws_get_stats(hass, connection, msg):
             "acc_energy": data.get("acc_energy", 0.0),
             "acc_cost": data.get("acc_cost", 0.0),
             "monthly": data.get("monthly", {}),
+            "daily": data.get("daily", {}),
             "tracked_users": coordinator.tracked_users,
             "user_map": coordinator.user_map,
             "monthly_loaded": coordinator._monthly_loaded,
+            "daily_loaded": coordinator._daily_loaded,
             "gauge1_value": data.get("gauge1_value"),
             "gauge1_unit": data.get("gauge1_unit"),
             "gauge1_label": data.get("gauge1_label"),

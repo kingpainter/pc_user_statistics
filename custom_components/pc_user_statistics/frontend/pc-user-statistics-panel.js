@@ -1,6 +1,14 @@
 // PC User Statistics Panel
-// Version: 3.6.0 — Vanilla JS (no imports)
+// Version: 3.7.0 — Vanilla JS (no imports)
 // Last Updated: July 17, 2026
+//
+// Changes in 3.7.0:
+//   FIX: _familySafetyHTML()'s "Skærmtid i dag" comparison was silently
+//        comparing MS's daily screen_time against the PC's WHOLE-MONTH total
+//        (this._stats.monthly) — both labelled "i dag", increasingly wrong as
+//        the month progressed. Now reads this._stats.daily (new backend
+//        __init__.py 2.15.0 "today" tracker, exposed via websocket.py 3.6.0),
+//        a real day-only total, for a fair apples-to-apples comparison.
 //
 // Changes in 3.6.0:
 //   NEW: "Prissensor" health metric on Admin tab — shows whether the price
@@ -1078,7 +1086,7 @@ class PcUserStatisticsPanel extends HTMLElement {
       </div>`;
     }
     const users = this._stats?.tracked_users || [];
-    const monthly = this._stats?.monthly || {};
+    const daily = this._stats?.daily || {};
     const COLORS = ["#8b5cf6","#f59e0b","#10b981","#ef4444","#6366f1"];
     const cards = users.map((u, idx) => {
       const fsData = fs.users?.[u];
@@ -1086,7 +1094,7 @@ class PcUserStatisticsPanel extends HTMLElement {
       const col = COLORS[idx % COLORS.length];
       const msMin = fsData.screen_time_min ?? 0;
       const msSecs = msMin * 60;
-      const pcSecs = monthly[u]?.time || 0;
+      const pcSecs = daily[u]?.time || 0;
       const maxSecs = Math.max(msSecs, pcSecs, 1);
       const msPct = Math.round(msSecs / maxSecs * 100);
       const pcPct = Math.round(pcSecs / maxSecs * 100);

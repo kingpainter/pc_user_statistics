@@ -1,7 +1,23 @@
 # File Name: __init__.py
-# Version: 2.14.0
+# Version: 2.15.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
 # Last Updated: July 17, 2026
+#
+# Changes in 2.15.0:
+#   NEW: Daily ("today") totals tracker — self.daily, mirroring self.monthly
+#        in every way (delta accumulation, InfluxDB load with baseline floor
+#        protection, periodic persistence, day-rollover reset). Added because
+#        the Statistik tab's MS Family Safety comparison was silently
+#        comparing MS's "screen time today" against the PC's WHOLE-MONTH
+#        total (labelled "Skærmtid i dag" on both sides) — misleading more and
+#        more as the month progressed. panel.js now reads `daily` instead of
+#        `monthly` for that specific comparison.
+#   FIX: Month AND day rollover now use Europe/Copenhagen local time
+#        (LOCAL_TIMEZONE, const.py) instead of UTC. UTC rollover fired up to
+#        2 hours late during CEST (UTC+2) — same class of bug as the Historik
+#        tab's tz fix in websocket.py 3.5.0. The InfluxDB WHERE-clause start
+#        boundaries for both monthly and daily loads are now computed from
+#        local midnight, converted to UTC, instead of UTC midnight.
 #
 # Changes in 2.14.0:
 #   NEW: Monthly baseline protection. _async_load_monthly_data() previously
@@ -169,6 +185,7 @@ import asyncio
 import logging
 import time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import urllib.parse
@@ -192,6 +209,7 @@ from .const import (
     MAX_BUFFERED_WRITES,
     MAX_RETRY_ATTEMPTS,
     PRICE_FALLBACK_LOG_INTERVAL,
+    LOCAL_TIMEZONE,
     CONF_USER_MAPPINGS,
     CONF_TRACKED_USERS,
     DEFAULT_USER_MAP,
@@ -285,6 +303,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # very first load already has something to protect against.
         coordinator._store = store
         coordinator._persisted_monthly_baseline = store.get_monthly_baseline()
+        coordinator._persisted_daily_baseline = store.get_daily_baseline()
 
         await coordinator.async_config_entry_first_refresh()
 
@@ -321,6 +340,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # only runs after coordinator._store and _persisted_monthly_baseline are
         # wired up above. Scheduling it from __init__ would race against that.
         hass.async_create_task(coordinator._async_load_monthly_data())
+        hass.async_create_task(coordinator._async_load_daily_data())
 
         # Read the current user sensor state at startup.
         # async_track_state_change_event only fires on *future* changes — if HA restarts
@@ -453,10 +473,28 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # True once _async_load_monthly_data() has successfully set self.monthly
         self._monthly_loaded: bool = False
 
+        # Daily ("today") totals (v2.15.0) — same pattern as monthly above,
+        # reset at local midnight instead of month-end. Added so the
+        # Statistik tab's MS Family Safety comparison has a real "today" PC
+        # total to compare against, instead of accidentally using the month.
+        self.daily: dict[str, dict[str, float]] = {
+            user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+            for user in self.tracked_users
+        }
+        self._daily_pending: dict[str, dict[str, float]] = {
+            user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+            for user in self.tracked_users
+        }
+        self._daily_loaded: bool = False
+
         # ── Timing ────────────────────────────────────────────────────────
         self.last_time: float = time.time()
         self.last_power: float = 0.0
-        self.last_month: int = datetime.now(timezone.utc).month
+        # v2.15.0 — month/day rollover tracked in LOCAL time (Europe/Copenhagen),
+        # not UTC. UTC rollover fired up to 2 hours late during CEST (UTC+2).
+        _now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
+        self.last_month: int = _now_local.month
+        self.last_day = _now_local.date()
         # FIX v2.7.4: initialised to 0.0 (not time.time()) so system_health
         # correctly shows "aldrig" until the first real InfluxDB write occurs.
         self.last_write_time: float = 0.0
@@ -526,6 +564,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # InfluxDB outage that left recent writes stuck in the RAM buffer).
         self._store = None
         self._persisted_monthly_baseline: dict[str, dict[str, float]] = {}
+        # Same protection for the daily tracker (v2.15.0)
+        self._persisted_daily_baseline: dict[str, dict[str, float]] = {}
 
         # NOTE: _async_load_monthly_data() is intentionally NOT scheduled here.
         # It's scheduled explicitly by async_setup_entry, AFTER _store and
@@ -600,6 +640,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         if self._store is not None and self._monthly_loaded:
             self._store.save_monthly_baseline_in_memory(self.monthly)
             await self._store.async_flush_monthly_baseline()
+        if self._store is not None and self._daily_loaded:
+            self._store.save_daily_baseline_in_memory(self.daily)
+            await self._store.async_flush_daily_baseline()
 
         # Snapshot Microsoft screen_time before shutdown so _async_restore_session
         # can compute the gap delta on next startup.
@@ -684,6 +727,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         if self._store is not None and self._monthly_loaded:
             self._store.save_monthly_baseline_in_memory(self.monthly)
             await self._store.async_flush_monthly_baseline()
+        if self._store is not None and self._daily_loaded:
+            self._store.save_daily_baseline_in_memory(self.daily)
+            await self._store.async_flush_daily_baseline()
 
         if not self.current_user:
             # Reschedule even if no active user — ensures we pick up next login
@@ -730,10 +776,13 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         reload triggers this reload — which is exactly what was found to be
         happening in production (see changelog).
         """
-        now = datetime.now(timezone.utc)
-        month_start = (
-            now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-        )
+        # v2.15.0 — month boundary computed from LOCAL midnight (Europe/
+        # Copenhagen), converted to UTC for the InfluxDB query. Using UTC
+        # midnight directly made the query window start up to 2 hours into
+        # the new local month during CEST.
+        now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
+        month_start_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_start = month_start_local.astimezone(timezone.utc).isoformat()
 
         query = (
             f'SELECT SUM("time_delta") AS "time", '
@@ -841,6 +890,116 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.exception("Unexpected error loading monthly data: %s", err)
             self._monthly_loaded = True
+
+    async def _async_load_daily_data(self, retry: int = 0) -> None:
+        """Query InfluxDB for today's sums and merge into self.daily.
+
+        Exact mirror of _async_load_monthly_data() — same retry/backoff
+        schedule, same baseline-floor protection via
+        self._persisted_daily_baseline, same fallback-to-baseline behaviour
+        if all retries fail. Window is local calendar "today" instead of
+        "this month".
+        """
+        now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
+        day_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start = day_start_local.astimezone(timezone.utc).isoformat()
+
+        query = (
+            f'SELECT SUM("time_delta") AS "time", '
+            f'SUM("energy_delta") AS "energy", '
+            f'SUM("cost_delta") AS "cost" '
+            f'FROM {MEASUREMENT} '
+            f"WHERE time >= '{day_start}' "
+            f'GROUP BY "user"'
+        )
+
+        try:
+            query_params = urllib.parse.urlencode({"q": query, "db": self.config["database"]})
+            async with self._http_session.get(
+                f"{self._influx_base_url}/query?{query_params}"
+            ) as response:
+                if response.status != 200:
+                    raise aiohttp.ClientError(f"HTTP {response.status}")
+                data = await response.json()
+
+            field_mappings = {"time": 1, "energy": 2, "cost": 3}
+            parsed_data = parse_influxdb_response(data, field_mappings)
+
+            new_daily: dict[str, dict[str, float]] = {
+                user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+                for user in self.tracked_users
+            }
+            for user, values in parsed_data.items():
+                if user in new_daily:
+                    for key, val in values.items():
+                        new_daily[user][key] = float(val or 0)
+
+            baseline = self._persisted_daily_baseline or {}
+            for user in self.tracked_users:
+                b = baseline.get(user, {})
+                for key in ("time", "energy", "cost"):
+                    floor_val = b.get(key, 0.0)
+                    if new_daily[user][key] < floor_val:
+                        _LOGGER.warning(
+                            "Daily %s for '%s' from InfluxDB (%.2f) is lower than the "
+                            "last known baseline (%.2f) — keeping the higher value.",
+                            key, user, new_daily[user][key], floor_val,
+                        )
+                        new_daily[user][key] = floor_val
+
+            for user in self.tracked_users:
+                pending = self._daily_pending.get(user, {})
+                for key in ("time", "energy", "cost"):
+                    new_daily[user][key] += pending.get(key, 0.0)
+
+            self.daily = new_daily
+            self._daily_pending = {}
+            self._daily_loaded = True
+            _LOGGER.info(
+                "Daily data loaded from InfluxDB: %s",
+                {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in self.daily.items()},
+            )
+
+            if self._store is not None:
+                self._store.save_daily_baseline_in_memory(self.daily)
+                await self._store.async_flush_daily_baseline()
+
+        except aiohttp.ClientError as err:
+            max_retries = 3
+            if retry < max_retries:
+                delay = 30 * (2 ** retry)
+                _LOGGER.warning(
+                    "InfluxDB not ready for daily data load (attempt %d/%d), "
+                    "retrying in %ds: %s",
+                    retry + 1, max_retries, delay, err,
+                )
+                async def _retry():
+                    await asyncio.sleep(delay)
+                    if self._unloaded:
+                        _LOGGER.debug("Integration unloaded — aborting daily data retry")
+                        return
+                    await self._async_load_daily_data(retry=retry + 1)
+                self.hass.async_create_task(_retry())
+            else:
+                baseline = self._persisted_daily_baseline or {}
+                _LOGGER.error(
+                    "Failed to load daily data from InfluxDB after %d attempts: %s. "
+                    "Falling back to last known baseline instead of resetting to 0.",
+                    max_retries, err,
+                )
+                self.daily = {
+                    user: {
+                        "time":   baseline.get(user, {}).get("time", 0.0),
+                        "energy": baseline.get(user, {}).get("energy", 0.0),
+                        "cost":   baseline.get(user, {}).get("cost", 0.0),
+                    }
+                    for user in self.tracked_users
+                }
+                self._daily_loaded = True
+
+        except Exception as err:
+            _LOGGER.exception("Unexpected error loading daily data: %s", err)
+            self._daily_loaded = True
 
     async def _async_restore_session(self, store: "NotificationStore") -> None:
         """Restore in-progress session from persistent store after HA restart."""
@@ -974,7 +1133,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         async with self._update_lock:
             now = time.time()
 
-            current_month = datetime.now(timezone.utc).month
+            _now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
+            current_month = _now_local.month
+            current_day = _now_local.date()
             if current_month != self.last_month:
                 _LOGGER.info(
                     "Month rolled over (%d → %d) — resetting monthly totals and reloading from InfluxDB",
@@ -1000,6 +1161,29 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     await self._store.async_flush_monthly_baseline()
                 await self._async_load_monthly_data()
                 self.last_month = current_month
+
+            if current_day != self.last_day:
+                _LOGGER.info(
+                    "Day rolled over (%s → %s) — resetting daily totals and reloading from InfluxDB",
+                    self.last_day, current_day,
+                )
+                self.daily = {
+                    user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+                    for user in self.tracked_users
+                }
+                self._daily_pending = {
+                    user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
+                    for user in self.tracked_users
+                }
+                self._daily_loaded = False
+                # New day starts fresh — last day's baseline floor must not
+                # carry over (same reasoning as the monthly reset above).
+                self._persisted_daily_baseline = {}
+                if self._store is not None:
+                    self._store.save_daily_baseline_in_memory(self.daily)
+                    await self._store.async_flush_daily_baseline()
+                await self._async_load_daily_data()
+                self.last_day = current_day
 
             if self.failed_writes:
                 if self._retry_skip_remaining > 0:
@@ -1152,6 +1336,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             target[self.current_user]["time"]   += delta_time
             target[self.current_user]["energy"] += energy_delta
             target[self.current_user]["cost"]   += cost_delta
+
+        daily_target = self.daily if self._daily_loaded else self._daily_pending
+        if self.current_user in daily_target:
+            daily_target[self.current_user]["time"]   += delta_time
+            daily_target[self.current_user]["energy"] += energy_delta
+            daily_target[self.current_user]["cost"]   += cost_delta
 
         time_since_write = now - self.last_write_time
         if force_write or time_since_write >= WRITE_THRESHOLD:
@@ -1445,6 +1635,18 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 for user in self.tracked_users
             }
 
+        if self._daily_loaded:
+            daily_view = self.daily
+        else:
+            daily_view = {
+                user: {
+                    "time":   self.daily[user]["time"]   + self._daily_pending.get(user, {}).get("time", 0.0),
+                    "energy": self.daily[user]["energy"] + self._daily_pending.get(user, {}).get("energy", 0.0),
+                    "cost":   self.daily[user]["cost"]   + self._daily_pending.get(user, {}).get("cost", 0.0),
+                }
+                for user in self.tracked_users
+            }
+
         return {
             "current_user":   self.current_user,
             "acc_time":       self.acc_time,
@@ -1452,6 +1654,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             "acc_cost":       self.acc_cost,
             "monthly":        monthly_view,
             "monthly_loaded": self._monthly_loaded,
+            "daily":          daily_view,
+            "daily_loaded":   self._daily_loaded,
             "price_fallback_count": self._price_fallback_count,
             "last_valid_price":     self._last_valid_price,
             "price_entity_ok":      self._is_price_entity_ok(),

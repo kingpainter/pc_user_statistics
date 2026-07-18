@@ -1,7 +1,15 @@
 # File Name: store.py
-# Version: 2.11.0
+# Version: 2.12.0
 # Description: Persistent storage for notification rules using HA store (.storage).
 # Last Updated: July 17, 2026
+#
+# Changes in 2.12.0:
+#   NEW: Daily baseline persistence — get_daily_baseline(),
+#        save_daily_baseline_in_memory(), async_flush_daily_baseline().
+#        Mirrors the monthly baseline (2.11.0) but for the new "today" totals
+#        tracker in __init__.py, used for a fair MS Family Safety vs. PC
+#        "skærmtid i dag" comparison on the Statistik tab (previously compared
+#        MS's daily figure against the PC's whole-month total by mistake).
 #
 # Changes in 2.11.0:
 #   NEW: Monthly baseline persistence — get_monthly_baseline(),
@@ -284,6 +292,32 @@ class NotificationStore:
             _LOGGER.debug("Monthly baseline flushed to disk")
         except Exception as err:
             _LOGGER.error("Failed to flush monthly baseline to disk: %s", err)
+
+    # ── Daily baseline (v2.15.0 protection) ──────────────────────────
+
+    def get_daily_baseline(self) -> dict[str, dict[str, float]]:
+        """Return the last persisted "today" totals baseline.
+
+        Mirrors get_monthly_baseline() — protects the daily tracker against
+        the same restart/reload data-loss pattern the monthly tracker had.
+        Stored in the CONFIG store so it survives a normal user logout.
+        """
+        return self._data.get("daily_baseline", {})
+
+    def save_daily_baseline_in_memory(self, daily: dict[str, dict[str, float]]) -> None:
+        """Update the daily baseline in RAM — no disk write.
+
+        Call async_flush_daily_baseline() afterwards to persist.
+        """
+        self._data["daily_baseline"] = daily
+
+    async def async_flush_daily_baseline(self) -> None:
+        """Persist the daily baseline to the config store immediately."""
+        try:
+            await self._store.async_save(self._data)
+            _LOGGER.debug("Daily baseline flushed to disk")
+        except Exception as err:
+            _LOGGER.error("Failed to flush daily baseline to disk: %s", err)
 
     # ── Sent tracking (anti-spam) ────────────────────────────────────────────
 
