@@ -1,9 +1,17 @@
 // PC User Statistics – Custom Lovelace Cards
-// Version: 2.6.0
+// Version: 2.6.1
 // Cards:
 //   custom:pc-user-statistics-user-card   – compact single-user card (mobile)
 //   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop)
-// Last Updated: June 5, 2026
+// Last Updated: July 20, 2026
+//
+// Changes in 2.6.1:
+//   FIX: pc-user-statistics-tablet-card filled a Lovelace `type: panel` view
+//        incorrectly (small centered card instead of full screen on 7" tablet).
+//        :host now sets height:100%; ha-card is a 100%-height flex column
+//        with overflow:hidden; .card and .main-row use flex:1 + min-height:0
+//        so they scale to the panel instead of shrinking/overflowing.
+//        (Same pattern as secure_me_alarm_tab_card.js .root container.)
 //
 // Changes in 2.6.0:
 //   NEW: Microsoft Family Safety screen_time shown in both cards
@@ -695,25 +703,42 @@ class PcUserStatisticsTabletCard extends HTMLElement {
       <style>
         :host {
           display: block;
+          height: 100%;
           ${cssVars()}
           font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
         }
+        ha-card {
+          width: 100%;
+          height: 100%;
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+        }
         .card {
+          flex: 1;
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
           background: var(--bg);
           border-radius: 16px;
           padding: 16px 20px;
           color: var(--text);
           box-shadow: var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.15));
+          overflow: auto;
         }
         .card-title {
           font-size: 14px; font-weight: 700;
           text-transform: uppercase; letter-spacing: 1px;
           color: var(--sub); margin-bottom: 12px;
+          flex-shrink: 0;
         }
 
         /* ── Two-column layout ── */
         .main-row {
           display: flex; gap: 14px; align-items: flex-start;
+          flex: 1;
+          min-height: 0;
         }
         .left-col  { display: flex; flex-direction: column; gap: 10px; flex: 1; min-width: 0; }
         .right-col {
