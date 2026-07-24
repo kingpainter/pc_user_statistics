@@ -1,9 +1,17 @@
 // PC User Statistics – Custom Lovelace Cards
-// Version: 2.6.1
+// Version: 2.6.2
 // Cards:
 //   custom:pc-user-statistics-user-card   – compact single-user card (mobile)
 //   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop)
-// Last Updated: July 20, 2026
+// Last Updated: July 21, 2026
+//
+// Changes in 2.6.2:
+//   FIX: pc-user-statistics-tablet-card was still a little too tall for a 7"
+//        tablet panel view — the left column (stacked user cards) overflowed
+//        below the visible screen while the right column fit fine. Trimmed
+//        vertical padding/gaps in .card, .card-title, .left-col, .user-card,
+//        .user-card-header and .u-row to reclaim ~65-70px of height. No
+//        layout/structure changes, purely spacing.
 //
 // Changes in 2.6.1:
 //   FIX: pc-user-statistics-tablet-card filled a Lovelace `type: panel` view
@@ -722,7 +730,7 @@ class PcUserStatisticsTabletCard extends HTMLElement {
           flex-direction: column;
           background: var(--bg);
           border-radius: 16px;
-          padding: 16px 20px;
+          padding: 12px 20px;
           color: var(--text);
           box-shadow: var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.15));
           overflow: auto;
@@ -730,7 +738,7 @@ class PcUserStatisticsTabletCard extends HTMLElement {
         .card-title {
           font-size: 14px; font-weight: 700;
           text-transform: uppercase; letter-spacing: 1px;
-          color: var(--sub); margin-bottom: 12px;
+          color: var(--sub); margin-bottom: 8px;
           flex-shrink: 0;
         }
 
@@ -740,7 +748,7 @@ class PcUserStatisticsTabletCard extends HTMLElement {
           flex: 1;
           min-height: 0;
         }
-        .left-col  { display: flex; flex-direction: column; gap: 10px; flex: 1; min-width: 0; }
+        .left-col  { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
         .right-col {
           display: flex; flex-direction: column; gap: 10px;
           flex-shrink: 0; width: 150px;
@@ -749,18 +757,18 @@ class PcUserStatisticsTabletCard extends HTMLElement {
         /* ── Monthly user cards ── */
         .user-card {
           background: var(--bg2); border-radius: 12px;
-          padding: 12px; border: 1px solid transparent;
+          padding: 9px 12px; border: 1px solid transparent;
           transition: border-color .2s;
         }
         .user-card-active { border-width: 1px; border-style: solid; }
         .user-card-header {
-          display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+          display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
         }
         .user-card-name { font-size: 13px; font-weight: 700; text-transform: capitalize; flex: 1; }
         .live-dot { font-size: 10px; }
         .u-row {
           display: flex; justify-content: space-between; align-items: center;
-          padding: 3px 0; border-bottom: 1px solid var(--div); font-size: 12px;
+          padding: 2px 0; border-bottom: 1px solid var(--div); font-size: 12px;
         }
         .u-row:last-child { border-bottom: none; }
         .u-ms { background: rgba(139,92,246,0.07); border-radius: 4px; padding-left: 3px; margin-top: 2px; }
@@ -833,7 +841,7 @@ class PcUserStatisticsTabletCard extends HTMLElement {
 
         .section-label {
           font-size: 10px; font-weight: 600; text-transform: uppercase;
-          letter-spacing: 1px; color: var(--sub); margin-bottom: 8px;
+          letter-spacing: 1px; color: var(--sub); margin-bottom: 6px;
         }
         .loading { color: var(--sub); font-size: 13px; padding: 8px 0; }
       </style>
