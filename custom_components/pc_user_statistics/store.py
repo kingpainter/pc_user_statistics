@@ -293,7 +293,7 @@ class NotificationStore:
         except Exception as err:
             _LOGGER.error("Failed to flush monthly baseline to disk: %s", err)
 
-    # ── Daily baseline (v2.15.0 protection) ──────────────────────────
+    # ── Daily baseline (v2.15.0 protection) ───────────────────────
 
     def get_daily_baseline(self) -> dict[str, dict[str, float]]:
         """Return the last persisted "today" totals baseline.

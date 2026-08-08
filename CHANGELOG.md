@@ -6,6 +6,99 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [Frontend] pc-user-statistics-cards.js 2.6.11 - 2026-08-08
+
+### Fixed
+
+- **Donut blev stadig ikke større, selv efter fuld sidegenindlæsning på tabletten** (`frontend/pc-user-statistics-cards.js`):
+  - **Problem**: Den JS-målte størrelse fra 2.6.9 (`_sizeDonut()`, baseret på `.right-col`'s målte bredde) endte fortsat på den lille 180px CSS-fallback, også efter en reelt bekræftet frisk side-indlæsning (cache udelukket som årsag).
+  - **Fix**: JS-målingen er fjernet helt. `.donut-ring` bruger nu det klassiske "padding-bottom procent"-trick (`width:92%; height:0; padding-bottom:92%`) — en teknik der har været pålidelig i alle browsere siden CSS2.1, uden `aspect-ratio`, uden `calc()`-enheds-division, og uden JS der kan fejle stille.
+
+
+---
+## [Frontend] pc-user-statistics-cards.js 2.6.10 - 2026-08-08
+
+### Fixed
+
+- **Donut blev for lille efter 2.6.9-omskrivningen** (`frontend/pc-user-statistics-cards.js`): `_sizeDonut()`'s loft på 340px var langt under hvad den faktiske ~570px brede højre kolonne på tabletten har plads til. Loft hævet til 460px og andelen af kolonnens bredde brugt fra 0,9 til 0,98.
+
+---
+## [Frontend] pc-user-statistics-cards.js 2.6.9 - 2026-08-08
+
+### Fixed
+
+- **Donut fulgte stadig ikke toppen af venstre kolonne, trods 2.6.8-forsøget** (`frontend/pc-user-statistics-cards.js`):
+  - **Problem**: `justify-content: flex-start` + `aspect-ratio: 1` på `.donut-ring` opførte sig ikke pålideligt i tablettens WebView — samme type kvirk som `calc(vh/px)`-fejlen fra v2.6.5.
+  - **Fix**: Donuttens størrelse sættes nu direkte i JavaScript (`_sizeDonut()`, målt ud fra `.right-col`'s faktiske bredde, begrænset 120–340px) lige efter hvert render og ved vindues-resize. `.donut-wrap` er nu en almindelig `flex-shrink:0`-blok øverst i højre kolonne — ingen CSS-vokse/centrerings-tricks nødvendige.
+
+### Changed
+
+- **Større, tydeligere donut-legend** (Flemming/Lukas/Sebastian-listen under donutten): skrift 13px → 19px + halvfed, prikker 8px → 14px, mere række-afstand, federe procent-tekst.
+
+
+---
+## [Frontend] pc-user-statistics-cards.js 2.6.8 - 2026-08-08
+
+### Changed
+
+- **Donut-justering og større tekst i venstre kolonne** (`frontend/pc-user-statistics-cards.js`):
+  - Donuttens top flugter nu med toppen af Flemmings kort i stedet for at være lodret centreret i højre kolonne (`.donut-wrap` skiftet fra `justify-content: center` til `flex-start`). Ringen er også en anelse mindre (`max-width` 100% → 88%).
+  - Tekststørrelser i Flemming/Lukas/Sebastian-kortene hævet for bedre læsbarhed på afstand: brugernavn 13px → 20px, Tid/Energi/Pris/Skærm-rækker 12px → 17px (og federe værdi-tekst), lille avatar 28px → 40px.
+
+
+---
+## [Frontend] pc-user-statistics-cards.js 2.6.7 - 2026-08-08
+
+### Changed
+
+- **Donut i højre kolonne var stadig en lille fast cirkel efter 2.6.6-redesignet** (`frontend/pc-user-statistics-cards.js`):
+  - **Problem**: Højre kolonne så tom/ubalanceret ud ved siden af den nu fuld-højde venstre kolonne — donutten fyldte stadig kun ~120px.
+  - **Fix**: `.donut-wrap` er nu `flex: 1` og opsluger al resterende lodret plads i `.right-col` (live-status/gauges nedenunder beholder deres naturlige kompakte størrelse). `.donut-ring` sizes udelukkende via `aspect-ratio: 1` ud fra sin egen udregnede flex-højde (begrænset af `max-width: 100%`), og selve SVG'en fylder den boks 100%. Ingen magiske pixel-tal — en responsiv firkant der vokser/krymper efter tilgængelig plads. Center-tekst (%/navn) og legend-rækkernes skriftstørrelser er hævet til at matche den nu meget større ring.
+
+
+---
+## [Frontend] pc-user-statistics-cards.js 2.6.6 - 2026-08-08
+
+### Changed
+
+- **Layout omlagt for at fylde pladsen fuldt ud på tabletten** (`frontend/pc-user-statistics-cards.js`):
+  - `.main-row` er nu CSS Grid med `grid-template-columns: 7fr 3fr` (70/30-split ml. bruger-kort og donut/gauges), som automatisk tilpasser sig uanset skærmstørrelse — erstatter den gamle faste-bredde højre-kolonne.
+  - `.user-card` bruger nu `flex: 1`, så de 3 månedlige brugerkort deler den fulde tilgængelige højde i venstre kolonne ligeligt.
+  - Ny `.user-stats`-wrapper med `justify-content: space-evenly` så Tid/Energi/Pris/Skærm-rækkerne breder sig ud i det højere kort i stedet for at klumpe sig sammen foroven.
+  - `.right-col` bruger samme `space-evenly`-fordeling for donut/live-session/gauges.
+
+
+---
+## [Frontend] pc-user-statistics-cards.js 2.6.5 - 2026-08-08
+
+### Fixed
+
+- **Højde-skalering på tabletten virkede slet ikke, kun bredden** (`frontend/pc-user-statistics-cards.js`):
+  - **Problem**: `--sm-scale-h: clamp(0.8, calc(100vh / 800px), 1.8)` (v2.6.3) deler en `vh`-enhed med en `px`-enhed inde i `calc()`. Det er ikke pålideligt understøttet på tværs af WebViews — på tablettens kiosk-browser faldt custom property'en stille tilbage til sin standardværdi, så alle `calc(Npx * var(--sm-scale-h))`-størrelser forblev ved deres 7"-tablet-bæreværdier. Bredden virkede fordi den er ren flex/procent-baseret og ikke afhænger af denne variabel.
+  - **Fix**: Skaleringsfaktoren beregnes nu i JavaScript (`_updateScale()`, baseret på `window.innerHeight`) og sættes som inline custom property på kort-elementet via `style.setProperty()`. Køres ved `connectedCallback`/`setConfig` og holdes opdateret via en `resize`-listener. CSS-fallback'en er nu blot `--sm-scale-h: 1`.
+
+
+---
+## [Frontend] pc-user-statistics-cards.js 2.6.4 - 2026-08-08
+
+### Fixed
+
+- **Højre kolonne (donut/gauges) skubbede venstre kolonne smallere på tabletten** (`frontend/pc-user-statistics-cards.js`):
+  - **Problem**: v2.6.3's `--sm-scale-h` skalerede `.donut-svg` og avatarer op i både bredde og højde (for at forblive runde), men `.right-col` beholdt en fast `width: 150px`. Ved skala 1.5x blev donut'en 180px bred i en 150px kolonne, som derfor visuelt voksede sig bredere og pressede `.left-col` smallere.
+  - **Fix**: `.right-col` bruger nu også `calc(150px * var(--sm-scale-h))`.
+
+
+---
+## [Frontend] pc-user-statistics-cards.js 2.6.3 - 2026-08-08
+
+### Fixed
+
+- **`pc-user-statistics-tablet-card` skalerede ikke til den nye 11" tablet** (`frontend/pc-user-statistics-cards.js`):
+  - **Problem**: Kortet var tunet til den gamle 7" Lenovo-tablet (1280x800) og efterlod tomrum i bunden på den nye Samsung Tab A11+ (1920x1200, samme 16:10-format).
+  - **Fix**: Tilføjet `--sm-scale-h: clamp(0.8, calc(100vh / 800px), 1.8)` på `:host`, samme mønster som `secure_me_alarm_tab_card.js`. Alle lodrette paddings/gaps/font-størrelser/element-højder (`.card`, `.user-card`, `.donut-svg`, `.live-block`, `.gauge-bars`, `.avatar` m.fl.) er wrappet i `calc(Npx * var(--sm-scale-h))`. Kun højde ændret — bredde/kolonne-layout er urørt.
+
+
+---
 ## [2.15.0] - 2026-07-17
 
 ### Fixed

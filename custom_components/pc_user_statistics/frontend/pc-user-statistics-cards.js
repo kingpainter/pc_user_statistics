@@ -1,9 +1,117 @@
 // PC User Statistics – Custom Lovelace Cards
-// Version: 2.6.2
+// Version: 2.6.11
 // Cards:
 //   custom:pc-user-statistics-user-card   – compact single-user card (mobile)
 //   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop)
-// Last Updated: July 21, 2026
+// Last Updated: August 8, 2026
+//
+// Changes in 2.6.11:
+//   FIX: The JS-measured donut sizing from 2.6.9 (_sizeDonut(), based on
+//        .right-col.clientWidth) was confirmed on-device to still be
+//        landing on the small 180px CSS fallback, even after a genuine full
+//        page reload (ruled out caching). Removed the JS measurement
+//        entirely -- .donut-ring now sizes itself with the classic
+//        "padding-bottom percentage" square trick (width:92%; height:0;
+//        padding-bottom:92%), which has been reliable CSS since 2.1 with no
+//        aspect-ratio, no calc() unit division, and no JS that can silently
+//        fail. svg and the center %/name label are absolutely positioned to
+//        fill the resulting box.
+//
+// Changes in 2.6.10:
+//   FIX: _sizeDonut() (2.6.9) capped the ring at 340px, well below what the
+//        actual ~570px-wide right column on the tablet allows -- donut
+//        looked too small. Cap raised to 460px and the width fraction used
+//        from 0.9 to 0.98.
+//
+// Changes in 2.6.9:
+//   FIX: The 2.6.8 attempt to top-align the donut (justify-content:
+//        flex-start on .donut-wrap + aspect-ratio:1/max-width:88% on
+//        .donut-ring) did not reliably resolve on the tablet's WebView --
+//        same class of quirk as the vh/px calc() bug fixed in 2.6.5. Ditched
+//        the CSS flex-grow/aspect-ratio approach entirely: .donut-ring now
+//        gets an explicit pixel width/height set in JS (_sizeDonut(), based
+//        on the actual measured clientWidth of .right-col, capped 120-340px)
+//        right after each render and on window resize. .donut-wrap is a
+//        plain flex-shrink:0 block at the top of .right-col now, so it
+//        naturally sits flush with the top of the left column -- no growth
+//        or centering tricks needed.
+//   NEW: Donut legend (Flemming/Lukas/Sebastian list) made much larger and
+//        more prominent: legend-row font 13px -> 19px + semi-bold, dots
+//        8px -> 14px, more row gap, bolder percentage text.
+//
+// Changes in 2.6.8:
+//   NEW: Donut top now aligns with the top of Flemming's card instead of
+//        sitting vertically centered in the right column. .donut-wrap
+//        switched from justify-content:center to flex-start -- the leftover
+//        flex space (donut-ring is width-constrained by the column, so it
+//        doesn't consume its full flex-grown height) now collects below the
+//        ring+legend instead of being split above/below. Ring also slightly
+//        smaller (max-width 100% -> 88%) to feel less dominant next to the
+//        left column.
+//   NEW: Left column (Flemming/Lukas/Sebastian cards) text sizes increased
+//        for readability at tablet-viewing distance: .user-card-name 13px
+//        -> 20px, .u-row (Tid/Energi/Pris/Skærm rows) 12px -> 17px + bolder
+//        value weight (600 -> 700), .avatar.sm 28px -> 40px.
+//
+// Changes in 2.6.7:
+//   NEW: Right column donut on pc-user-statistics-tablet-card was still a
+//        small fixed circle even after the 2.6.6 layout redesign, leaving
+//        the right column visually empty/unbalanced next to the now-full-
+//        height left column. .donut-wrap is now flex:1 so it consumes all
+//        leftover vertical space in .right-col (live-block/gauge-bars below
+//        keep their natural compact size); .donut-ring is sized purely via
+//        aspect-ratio:1 off its own resolved flex height (capped by
+//        max-width:100%), and the SVG fills that box at width/height:100%.
+//        No magic pixel numbers -- it's a responsive square that grows or
+//        shrinks to fill whatever space is actually available. Also bumped
+//        the center %/name text and legend row font sizes to match the now
+//        much larger ring.
+//
+// Changes in 2.6.6:
+//   NEW: pc-user-statistics-tablet-card two-column layout redesigned as a
+//        70/30 CSS grid split (grid-template-columns: 7fr 3fr) instead of
+//        flex:1 + a fixed-width right column. Also: .user-card now uses
+//        flex:1 so the 3 monthly user cards evenly share all available
+//        vertical space in the left column, and the new .user-stats wrapper
+//        uses justify-content:space-evenly so the Tid/Energi/Pris/Skærm rows
+//        spread out to fill the taller card instead of clumping at the top.
+//        .right-col uses the same space-evenly distribution for donut/live
+//        session/gauges. Net effect: the card now genuinely fills all
+//        available height on the tablet instead of leaving dead space below
+//        a fixed-size content block.
+//
+// Changes in 2.6.5:
+//   FIX: --sm-scale-h never actually scaled on the real tablet -- width
+//        adapted (plain flex/%, unrelated to the scale factor) but height
+//        stayed flat, leaving dead space below the card. Root cause:
+//        calc(100vh / 800px) divides two different CSS units (vh and px)
+//        inside calc(), which is not reliably computed the same way across
+//        WebViews -- it apparently silently fell back to the property's
+//        initial value on the tablet's kiosk browser, even though it looked
+//        fine in a desktop browser during development. Replaced with a JS
+//        computation (_updateScale(), based on window.innerHeight) pushed
+//        onto the host element via style.setProperty("--sm-scale-h", ...),
+//        run on connectedCallback/setConfig and kept in sync with a resize
+//        listener. This always works regardless of engine calc() quirks.
+//
+// Changes in 2.6.4:
+//   FIX: .right-col kept a fixed width:150px while its contents (.donut-svg,
+//        avatars) were scaled up by --sm-scale-h (v2.6.3) for the taller
+//        11" tablet. At scale 1.5x the donut grew to 180px but the column
+//        stayed 150px wide, so the right column visually overflowed its
+//        intended width, squeezing .left-col narrower than intended even
+//        though .left-col's own CSS was untouched. .right-col width is now
+//        calc(150px * var(--sm-scale-h)) so it scales with its contents.
+//
+// Changes in 2.6.3:
+//   FIX: pc-user-statistics-tablet-card was designed against the old 7"
+//        1280x800 Lenovo tablet and left dead space at the bottom on the
+//        new 11" Samsung Tab A11+ (1920x1200, same 16:10 ratio). Added a
+//        --sm-scale-h height-driven scale factor (clamp(0.8, 100vh/800px,
+//        1.8)), same pattern as secure_me_alarm_tab_card.js, and wrapped
+//        vertical paddings/gaps/font-sizes/element heights in calc()
+//        so the card scales up to fill the taller viewport. Width/column
+//        layout untouched -- height only, as requested.
 //
 // Changes in 2.6.2:
 //   FIX: pc-user-statistics-tablet-card was still a little too tall for a 7"
@@ -485,7 +593,21 @@ class PcUserStatisticsTabletCard extends HTMLElement {
 
   setConfig(config) {
     this._config = config ?? {};
+    this._updateScale();
     this._render();
+  }
+
+  // v2.6.5: CSS calc(100vh / 800px) — dividing a vh unit by a px unit inside
+  // calc() — is not reliably supported across WebViews (notably older
+  // Android WebView engines used by kiosk browsers like Fully Kiosk). The
+  // custom property silently fell back to its initial value there, so
+  // --sm-scale-h never actually scaled up on the tablet even though it
+  // worked fine in a desktop browser. Computed in JS instead and pushed as
+  // an inline custom property on the host element — always works.
+  _updateScale() {
+    const h = window.innerHeight || 800;
+    const scale = Math.min(1.8, Math.max(0.8, h / 800));
+    this.style.setProperty("--sm-scale-h", scale.toFixed(4));
   }
 
   set hass(h) {
@@ -516,6 +638,9 @@ class PcUserStatisticsTabletCard extends HTMLElement {
   }
 
   connectedCallback() {
+    this._updateScale();
+    this._resizeHandler = () => this._updateScale();
+    window.addEventListener("resize", this._resizeHandler);
     this._interval = setInterval(() => {
       if (this._errCount > 5) { clearInterval(this._interval); return; }
       if (document.visibilityState === "visible") this._loadStats();
@@ -524,6 +649,7 @@ class PcUserStatisticsTabletCard extends HTMLElement {
 
   disconnectedCallback() {
     clearInterval(this._interval);
+    if (this._resizeHandler) window.removeEventListener("resize", this._resizeHandler);
   }
 
   // Polling: refresh stats + family safety (gauge config is static, loaded once)
@@ -712,6 +838,12 @@ class PcUserStatisticsTabletCard extends HTMLElement {
         :host {
           display: block;
           height: 100%;
+          /* v2.6.5: fallback only — actual value is set at runtime via
+             this.style.setProperty() in _updateScale() (JS), because
+             calc(100vh / 800px) below (kept as a comment for history) does
+             not reliably compute in all WebViews:
+             OLD: --sm-scale-h: clamp(0.8, calc(100vh / 800px), 1.8); */
+          --sm-scale-h: 1;
           ${cssVars()}
           font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
         }
@@ -730,95 +862,141 @@ class PcUserStatisticsTabletCard extends HTMLElement {
           flex-direction: column;
           background: var(--bg);
           border-radius: 16px;
-          padding: 12px 20px;
+          padding: calc(12px * var(--sm-scale-h)) 20px;
           color: var(--text);
           box-shadow: var(--ha-card-box-shadow, 0 2px 8px rgba(0,0,0,.15));
           overflow: auto;
         }
         .card-title {
-          font-size: 14px; font-weight: 700;
+          font-size: calc(14px * var(--sm-scale-h)); font-weight: 700;
           text-transform: uppercase; letter-spacing: 1px;
-          color: var(--sub); margin-bottom: 8px;
+          color: var(--sub); margin-bottom: calc(8px * var(--sm-scale-h));
           flex-shrink: 0;
         }
 
         /* ── Two-column layout ── */
+        /* v2.6.6: 70/30 split via CSS grid (fr units), replacing the old
+           flex:1 + fixed-width right column. fr units auto-adjust to any
+           tablet width and correctly account for the gap, so both columns
+           always keep their intended ratio. Grid's default align-items:
+           stretch also makes both columns take the full row height, which
+           combined with flex:1 on .user-card + justify-content:space-evenly
+           below is what makes the card fill all available height instead of
+           leaving dead space at the bottom. */
         .main-row {
-          display: flex; gap: 14px; align-items: flex-start;
+          display: grid;
+          grid-template-columns: 7fr 3fr;
+          gap: 14px;
           flex: 1;
           min-height: 0;
         }
-        .left-col  { display: flex; flex-direction: column; gap: 6px; flex: 1; min-width: 0; }
+        .left-col  {
+          display: flex; flex-direction: column; gap: calc(6px * var(--sm-scale-h));
+          min-width: 0; min-height: 0;
+        }
         .right-col {
-          display: flex; flex-direction: column; gap: 10px;
-          flex-shrink: 0; width: 150px;
+          display: flex; flex-direction: column; gap: calc(10px * var(--sm-scale-h));
+          min-width: 0; min-height: 0;
         }
 
         /* ── Monthly user cards ── */
+        /* v2.6.6: flex:1 makes the 3 user-cards evenly share whatever height
+           .left-col has available (instead of sizing purely by content).
+           .user-stats below then gets justify-content:space-evenly so the
+           rows spread out to fill the taller card instead of clumping at
+           the top with blank space underneath. */
         .user-card {
+          flex: 1;
+          display: flex; flex-direction: column;
           background: var(--bg2); border-radius: 12px;
-          padding: 9px 12px; border: 1px solid transparent;
+          padding: calc(9px * var(--sm-scale-h)) 16px; border: 1px solid transparent;
           transition: border-color .2s;
         }
         .user-card-active { border-width: 1px; border-style: solid; }
         .user-card-header {
-          display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+          display: flex; align-items: center; gap: 10px; margin-bottom: calc(6px * var(--sm-scale-h));
+          flex-shrink: 0;
         }
-        .user-card-name { font-size: 13px; font-weight: 700; text-transform: capitalize; flex: 1; }
+        .user-card-name { font-size: calc(20px * var(--sm-scale-h)); font-weight: 700; text-transform: capitalize; flex: 1; }
         .live-dot { font-size: 10px; }
+        .user-stats {
+          flex: 1;
+          display: flex; flex-direction: column;
+          justify-content: space-evenly;
+          min-height: 0;
+        }
         .u-row {
           display: flex; justify-content: space-between; align-items: center;
-          padding: 2px 0; border-bottom: 1px solid var(--div); font-size: 12px;
+          padding: calc(2px * var(--sm-scale-h)) 0; border-bottom: 1px solid var(--div); font-size: calc(17px * var(--sm-scale-h));
         }
         .u-row:last-child { border-bottom: none; }
         .u-ms { background: rgba(139,92,246,0.07); border-radius: 4px; padding-left: 3px; margin-top: 2px; }
         .u-lbl { color: var(--sub); }
-        .u-val  { font-weight: 600; }
+        .u-val  { font-weight: 700; }
 
         /* ── Donut (top of right col) ── */
+        /* v2.6.11: JS-measured sizing (_sizeDonut(), 2.6.9) turned out to be
+           just as unreliable on this tablet's WebView as the earlier
+           aspect-ratio/calc(vh/px) attempts — whatever the reason, it kept
+           landing back on the 180px CSS fallback. Replaced with the classic
+           "padding-bottom percentage" square trick instead: a block's
+           padding-bottom percentage is always resolved against its parent's
+           WIDTH regardless of axis, which has been reliable CSS since 2.1 —
+           no aspect-ratio, no calc() unit division, no JS measurement, no
+           moving parts to silently fail. .donut-ring becomes a 92%-wide,
+           92%-tall (via padding-bottom) square purely from CSS; svg and the
+           center label are absolutely positioned to fill that box. */
         .donut-wrap {
-          display: flex; flex-direction: column; align-items: center; gap: 8px;
+          display: flex; flex-direction: column; align-items: center;
+          gap: calc(8px * var(--sm-scale-h));
+          flex-shrink: 0; width: 100%;
         }
-        .donut-ring { position: relative; }
-        .donut-svg  { width: 120px; height: 120px; display: block; }
+        .donut-ring {
+          position: relative;
+          flex-shrink: 0;
+          width: 92%;
+          height: 0;
+          padding-bottom: 92%;
+        }
+        .donut-svg  { position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: block; }
         .donut-center {
           position: absolute; top: 50%; left: 50%;
-          transform: translate(-50%,-50%); text-align: center; width: 70px;
+          transform: translate(-50%,-50%); text-align: center; width: 60%;
         }
-        .donut-top-user { font-size: 12px; font-weight: 700; text-transform: capitalize; white-space: nowrap; }
-        .donut-top-pct  { font-size: 18px; font-weight: 800; color: var(--text); line-height: 1.1; }
+        .donut-top-user { font-size: calc(20px * var(--sm-scale-h)); font-weight: 700; text-transform: capitalize; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .donut-top-pct  { font-size: calc(34px * var(--sm-scale-h)); font-weight: 800; color: var(--text); line-height: 1.1; }
         .donut-no-data  { font-size: 11px; color: var(--sub); }
-        .donut-legend   { width: 100%; display: flex; flex-direction: column; gap: 4px; }
-        .legend-row     { display: flex; align-items: center; gap: 6px; font-size: 11px; }
-        .legend-dot     { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-        .legend-name    { flex: 1; text-transform: capitalize; }
-        .legend-pct     { color: var(--sub); }
+        .donut-legend   { width: 100%; display: flex; flex-direction: column; gap: calc(9px * var(--sm-scale-h)); margin-top: calc(4px * var(--sm-scale-h)); }
+        .legend-row     { display: flex; align-items: center; gap: 10px; font-size: calc(19px * var(--sm-scale-h)); font-weight: 600; }
+        .legend-dot     { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
+        .legend-name    { flex: 1; text-transform: capitalize; color: var(--text); }
+        .legend-pct     { color: var(--sub); font-weight: 700; }
 
         /* ── Live session block (middle of right col) ── */
         .live-block {
           background: var(--bg2); border-radius: 10px;
-          padding: 10px; border: 1px solid var(--live-color, transparent);
-          display: flex; flex-direction: column; gap: 8px;
+          padding: calc(10px * var(--sm-scale-h)); border: 1px solid var(--live-color, transparent);
+          display: flex; flex-direction: column; gap: calc(8px * var(--sm-scale-h));
         }
         .live-user-row { display: flex; align-items: center; gap: 8px; }
         .lp-avatar {
-          width: 26px; height: 26px; border-radius: 50%;
+          width: calc(26px * var(--sm-scale-h)); height: calc(26px * var(--sm-scale-h)); border-radius: 50%;
           display: flex; align-items: center; justify-content: center;
-          font-size: 12px; font-weight: 700; color: #fff; flex-shrink: 0;
+          font-size: calc(12px * var(--sm-scale-h)); font-weight: 700; color: #fff; flex-shrink: 0;
         }
         .lp-info { min-width: 0; }
-        .lp-name  { font-size: 12px; font-weight: 700; text-transform: capitalize;
+        .lp-name  { font-size: calc(12px * var(--sm-scale-h)); font-weight: 700; text-transform: capitalize;
                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .lp-badge { font-size: 9px; color: #10b981; font-weight: 700; }
         .lp-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
         .lp-stat  { display: flex; flex-direction: column; gap: 1px; }
-        .lp-val   { font-size: 11px; font-weight: 700; white-space: nowrap; }
+        .lp-val   { font-size: calc(11px * var(--sm-scale-h)); font-weight: 700; white-space: nowrap; }
         .lp-lbl   { font-size: 9px; color: var(--sub); text-transform: uppercase; letter-spacing: .3px; }
         .live-idle { font-size: 11px; color: var(--sub); text-align: center; padding: 4px 0; }
 
         /* ── Gauge bars (bottom of right col) ── */
         .gauge-bars {
-          display: flex; gap: 6px; align-items: flex-end; height: 80px;
+          display: flex; gap: 6px; align-items: flex-end; height: calc(80px * var(--sm-scale-h));
         }
         .bar-col {
           display: flex; flex-direction: column; align-items: center;
@@ -834,14 +1012,14 @@ class PcUserStatisticsTabletCard extends HTMLElement {
         .bar-label { font-size: 8px; color: var(--sub); text-transform: uppercase; letter-spacing: .3px; white-space: nowrap; }
 
         /* ── Avatar ── */
-        .avatar    { width: 36px; height: 36px; border-radius: 50%;
+        .avatar    { width: calc(36px * var(--sm-scale-h)); height: calc(36px * var(--sm-scale-h)); border-radius: 50%;
                      display: flex; align-items: center; justify-content: center;
-                     font-size: 16px; font-weight: 700; color: #fff; flex-shrink: 0; }
-        .avatar.sm { width: 28px; height: 28px; font-size: 12px; }
+                     font-size: calc(16px * var(--sm-scale-h)); font-weight: 700; color: #fff; flex-shrink: 0; }
+        .avatar.sm { width: calc(40px * var(--sm-scale-h)); height: calc(40px * var(--sm-scale-h)); font-size: calc(18px * var(--sm-scale-h)); }
 
         .section-label {
-          font-size: 10px; font-weight: 600; text-transform: uppercase;
-          letter-spacing: 1px; color: var(--sub); margin-bottom: 6px;
+          font-size: calc(10px * var(--sm-scale-h)); font-weight: 600; text-transform: uppercase;
+          letter-spacing: 1px; color: var(--sub); margin-bottom: calc(6px * var(--sm-scale-h));
         }
         .loading { color: var(--sub); font-size: 13px; padding: 8px 0; }
       </style>
