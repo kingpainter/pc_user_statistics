@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Donut blev for lille efter 2.6.9-omskrivningen** (`frontend/pc-user-statistics-cards.js`): `_sizeDonut()`'s loft på 340px var langt under hvad den faktiske ~570px brede højre kolonne på tabletten har plads til. Loft hævet til 460px og andelen af kolonnens bredde brugt fra 0,9 til 0,98.
 
+
 ---
 ## [Frontend] pc-user-statistics-cards.js 2.6.9 - 2026-08-08
 
