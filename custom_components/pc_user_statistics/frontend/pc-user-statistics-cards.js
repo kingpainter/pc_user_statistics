@@ -1,9 +1,24 @@
 // PC User Statistics – Custom Lovelace Cards
-// Version: 2.6.11
+// Version: 2.6.12
 // Cards:
 //   custom:pc-user-statistics-user-card   – compact single-user card (mobile)
-//   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop)
-// Last Updated: August 8, 2026
+//   custom:pc-user-statistics-tablet-card – all-users overview (tablet/desktop/mobile)
+// Last Updated: August 21, 2026
+//
+// Changes in 2.6.12:
+//   FIX: pc-user-statistics-tablet-card used to adapt to both tablet and
+//        mobile, but the 2.6.x tablet-focused rework (fixed 7fr/3fr grid,
+//        _updateScale() scaling purely off window.innerHeight) broke the
+//        mobile case -- a phone in portrait has an innerHeight close to the
+//        tablet's, so it got nearly the same font/spacing upscale in a
+//        column 4-5x narrower, clipping user names, legend text and gauge
+//        labels. _updateScale() now takes the SMALLER of a height-based and
+//        a measured-width-based ratio, and toggles an is-mobile class on
+//        the host below 700px measured width. CSS switches .main-row from
+//        the 7fr/3fr grid to a single stacked column under that class, and
+//        .donut-ring/.gauge-bars shrink to fit. .legend-name also gets an
+//        ellipsis fallback so any remaining narrow case truncates cleanly
+//        instead of clipping raw. Tablet behaviour (>=700px) is unchanged.
 //
 // Changes in 2.6.11:
 //   FIX: The JS-measured donut sizing from 2.6.9 (_sizeDonut(), based on
@@ -604,10 +619,21 @@ class PcUserStatisticsTabletCard extends HTMLElement {
   // --sm-scale-h never actually scaled up on the tablet even though it
   // worked fine in a desktop browser. Computed in JS instead and pushed as
   // an inline custom property on the host element — always works.
+  // v2.6.12: _updateScale() previously scaled purely off window.innerHeight,
+  // with no awareness of width. A phone in portrait has an innerHeight close
+  // to the tablet's (~800-900px), so it received nearly the same upscale --
+  // in a column 4-5x narrower, causing clipped/overlapping text. Now takes
+  // the SMALLER of a height-based and a width-based ratio, and flags narrow
+  // hosts (<700px measured width) with an is-mobile class so CSS can switch
+  // the two-column grid to a single stacked column.
   _updateScale() {
+    const w = this.offsetWidth || window.innerWidth || 800;
     const h = window.innerHeight || 800;
-    const scale = Math.min(1.8, Math.max(0.8, h / 800));
+    const hScale = h / 800;
+    const wScale = w / 900;
+    const scale = Math.min(1.8, Math.max(0.8, Math.min(hScale, wScale)));
     this.style.setProperty("--sm-scale-h", scale.toFixed(4));
+    this.classList.toggle("is-mobile", w < 700);
   }
 
   set hass(h) {
@@ -899,6 +925,29 @@ class PcUserStatisticsTabletCard extends HTMLElement {
           min-width: 0; min-height: 0;
         }
 
+        /* v2.6.12: on narrow hosts (phones), stack the two columns instead
+           of keeping the 7fr/3fr grid squeezed into a too-narrow right-col.
+           is-mobile is toggled in JS (_updateScale()) based on measured
+           width, not a media query, because the card's rendered width can
+           differ from the viewport width depending on dashboard layout. */
+        :host(.is-mobile) .main-row {
+          grid-template-columns: 1fr;
+        }
+        :host(.is-mobile) .right-col {
+          order: 2;
+        }
+        :host(.is-mobile) .left-col {
+          order: 1;
+        }
+        :host(.is-mobile) .donut-ring {
+          width: 60%;
+          padding-bottom: 60%;
+          margin: 0 auto;
+        }
+        :host(.is-mobile) .gauge-bars {
+          height: calc(60px * var(--sm-scale-h));
+        }
+
         /* ── Monthly user cards ── */
         /* v2.6.6: flex:1 makes the 3 user-cards evenly share whatever height
            .left-col has available (instead of sizing purely by content).
@@ -969,7 +1018,8 @@ class PcUserStatisticsTabletCard extends HTMLElement {
         .donut-legend   { width: 100%; display: flex; flex-direction: column; gap: calc(9px * var(--sm-scale-h)); margin-top: calc(4px * var(--sm-scale-h)); }
         .legend-row     { display: flex; align-items: center; gap: 10px; font-size: calc(19px * var(--sm-scale-h)); font-weight: 600; }
         .legend-dot     { width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0; }
-        .legend-name    { flex: 1; text-transform: capitalize; color: var(--text); }
+        .legend-name    { flex: 1; min-width: 0; text-transform: capitalize; color: var(--text);
+                          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .legend-pct     { color: var(--sub); font-weight: 700; }
 
         /* ── Live session block (middle of right col) ── */

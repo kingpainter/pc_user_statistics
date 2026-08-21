@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [Frontend] pc-user-statistics-cards.js 2.6.12 - 2026-08-21
+
+### Fixed
+
+- **Mobilvisning af `pc-user-statistics-tablet-card` var brudt — elementer overlappede/klippede hinanden** (`frontend/pc-user-statistics-cards.js`):
+  - **Problem**: Kortet kunne oprindeligt tilpasse sig både tablet og mobil, men de tabletfokuserede rettelser i 2.6.x-serien (fast `7fr 3fr`-grid, `_updateScale()` der udelukkende skalerede efter `window.innerHeight`) ødelagde mobil-visningen. En telefon i portræt har en `innerHeight` tæt på tablettens, så den fik næsten samme skrift-/afstandsopskalering — bare i en højre-kolonne 4–5× smallere, hvilket klippede brugernavne, legend-tekst ("Flemming" → "Flemmin") og gauge-labels ("GPU TEMP", "SPEED").
+  - **Fix**: `_updateScale()` bruger nu den **mindste** af en højde-baseret og en målt-bredde-baseret skalering, og sætter en `is-mobile`-klasse på host-elementet under 700px målt bredde. CSS skifter `.main-row` fra `7fr 3fr`-grid til én stablet kolonne under den klasse (bruger-kort øverst, donut/live/gauges under), og formindsker donut-ring + gauge-højde til mobil-format. `.legend-name` fik en ellipsis-fallback som ekstra sikkerhedsnet. Tablet-visningen (≥700px) er upåvirket.
+
+
+---
 ## [Frontend] pc-user-statistics-cards.js 2.6.11 - 2026-08-08
 
 ### Fixed

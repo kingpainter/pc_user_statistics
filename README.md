@@ -299,6 +299,9 @@ Expected when PC is idle — the integration clamps negative values to 0.
 ### Panel not appearing in sidebar
 Restart Home Assistant fully (not just reload). If the panel JS file was updated, clear your browser cache.
 
+### Tablet card looks cramped or clipped on a phone screen
+`pc-user-statistics-tablet-card` (v2.6.12+) auto-detects a narrow host width (<700px) and switches from its two-column tablet layout to a single stacked column. If you're on an older cards.js version, either update to 2.6.12+, or use `pc-user-statistics-user-card` (one card per user) on mobile dashboards instead — it's designed for narrow widths from the start.
+
 ---
 
 ## 🔄 Migration from 1.x
