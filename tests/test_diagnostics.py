@@ -12,7 +12,7 @@ from custom_components.pc_user_statistics.diagnostics import async_get_config_en
 from custom_components.pc_user_statistics.const import DOMAIN, __version__
 
 
-def make_entry(state="loaded"):
+def make_entry(state="loaded", coordinator=None):
     entry = MagicMock()
     entry.entry_id = "test_entry_123"
     entry.title = "PC User Statistics"
@@ -30,6 +30,10 @@ def make_entry(state="loaded"):
         "tracked_users": ["flemming", "lukas"],
         "user_mappings": "konge=flemming",
     }
+    # Explicit, not auto-generated: a bare MagicMock() would otherwise give
+    # hasattr(entry, "runtime_data") == True with a truthy Mock value even
+    # when the test means "no coordinator" — the known hasattr+MagicMock trap.
+    entry.runtime_data = coordinator
     return entry
 
 
@@ -99,25 +103,21 @@ class TestDiagnostics:
     async def test_coordinator_data_when_present(self):
         coord = make_coordinator()
         hass = MagicMock()
-        hass.data = {DOMAIN: {"coordinator": coord}}
+        hass.data = {}
+        entry = make_entry(coordinator=coord)
 
-        # Make coordinator findable
-        coord.tracked_users = ["flemming", "lukas"]
-        hass.data[DOMAIN]["coord"] = coord
-
-        entry = make_entry()
         result = await async_get_config_entry_diagnostics(hass, entry)
-
-        # Even without coordinator found, result should be structurally valid
-        assert "coordinator" in result
-        assert "config_entry" in result
-        assert "options" in result
+        coordinator_data = result["coordinator"]
+        assert coordinator_data["current_user"] == "flemming"
+        assert coordinator_data["acc_time"] == 3600.0
+        assert coordinator_data["monthly_loaded"] is True
+        assert coordinator_data["tracked_users"] == ["flemming", "lukas"]
 
     @pytest.mark.asyncio
     async def test_coordinator_not_found_returns_empty_coordinator(self):
         hass = MagicMock()
         hass.data = {DOMAIN: {}}  # No coordinator
-        entry = make_entry()
+        entry = make_entry(coordinator=None)
 
         result = await async_get_config_entry_diagnostics(hass, entry)
         assert result["coordinator"] == {}

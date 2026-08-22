@@ -244,6 +244,23 @@ class TestWsGetDevices:
 
 # ── ws_add_manual_entry ────────────────────────────────────────────
 
+async def _call_async_response(func, hass, connection, msg):
+    """Call an @websocket_api.async_response-decorated handler in tests.
+
+    async_response wraps the coroutine function so a normal call schedules it
+    via hass.async_create_task(...) and returns None immediately (matching
+    HA's real websocket dispatch — fire-and-forget). Awaiting the wrapper
+    directly (as you can with plain @callback handlers like ws_get_stats)
+    raises "TypeError: object NoneType can't be used in 'await' expression".
+    This helper captures the coroutine that would have been scheduled via
+    hass.async_create_task and awaits it directly instead.
+    """
+    scheduled = {}
+    hass.async_create_task = lambda coro: scheduled.setdefault("coro", coro)
+    func(hass, connection, msg)
+    await scheduled["coro"]
+
+
 class TestWsAddManualEntry:
 
     def _make_env(self, write_success=True):
@@ -262,7 +279,7 @@ class TestWsAddManualEntry:
         hass = MagicMock()
         hass.config_entries.async_entries.return_value = []
         connection = MagicMock()
-        await ws_add_manual_entry(hass, connection, {
+        await _call_async_response(ws_add_manual_entry, hass, connection, {
             "id": 1, "user": "lukas", "date": "2026-06-13", "time_minutes": 450.0,
         })
         connection.send_error.assert_called_once()
@@ -271,7 +288,7 @@ class TestWsAddManualEntry:
     @pytest.mark.asyncio
     async def test_rejects_unknown_user(self):
         hass, connection, coord = self._make_env()
-        await ws_add_manual_entry(hass, connection, {
+        await _call_async_response(ws_add_manual_entry, hass, connection, {
             "id": 1, "user": "ukendt", "date": "2026-06-13", "time_minutes": 450.0,
         })
         connection.send_error.assert_called_once()
@@ -281,7 +298,7 @@ class TestWsAddManualEntry:
     @pytest.mark.asyncio
     async def test_rejects_non_positive_time(self):
         hass, connection, coord = self._make_env()
-        await ws_add_manual_entry(hass, connection, {
+        await _call_async_response(ws_add_manual_entry, hass, connection, {
             "id": 1, "user": "lukas", "date": "2026-06-13", "time_minutes": 0.0,
         })
         connection.send_error.assert_called_once()
@@ -291,7 +308,7 @@ class TestWsAddManualEntry:
     @pytest.mark.asyncio
     async def test_rejects_invalid_date_format(self):
         hass, connection, coord = self._make_env()
-        await ws_add_manual_entry(hass, connection, {
+        await _call_async_response(ws_add_manual_entry, hass, connection, {
             "id": 1, "user": "lukas", "date": "13-06-2026", "time_minutes": 450.0,
         })
         connection.send_error.assert_called_once()
@@ -301,7 +318,7 @@ class TestWsAddManualEntry:
     @pytest.mark.asyncio
     async def test_success_sends_result(self):
         hass, connection, coord = self._make_env(write_success=True)
-        await ws_add_manual_entry(hass, connection, {
+        await _call_async_response(ws_add_manual_entry, hass, connection, {
             "id": 1, "user": "lukas", "date": "2026-06-13",
             "time_minutes": 450.0, "energy_kwh": 1.2375, "cost_dkk": 1.3984,
         })
@@ -316,7 +333,7 @@ class TestWsAddManualEntry:
     @pytest.mark.asyncio
     async def test_write_failure_sends_error(self):
         hass, connection, coord = self._make_env(write_success=False)
-        await ws_add_manual_entry(hass, connection, {
+        await _call_async_response(ws_add_manual_entry, hass, connection, {
             "id": 1, "user": "lukas", "date": "2026-06-13", "time_minutes": 450.0,
         })
         connection.send_error.assert_called_once()

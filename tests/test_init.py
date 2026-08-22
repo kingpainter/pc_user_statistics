@@ -151,6 +151,8 @@ class TestWriteBuffer:
             coord._unloaded = False
             coord._consecutive_write_failures = 0
             coord._REPAIR_THRESHOLD = 5
+            coord._retry_skip_count = 0
+            coord._retry_skip_remaining = 0
             coord._LOGGER = MagicMock()
         return coord
 
