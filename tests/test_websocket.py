@@ -4,6 +4,7 @@
 import pytest
 import sys
 import os
+import asyncio
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -248,17 +249,29 @@ async def _call_async_response(func, hass, connection, msg):
     """Call an @websocket_api.async_response-decorated handler in tests.
 
     async_response wraps the coroutine function so a normal call schedules it
-    via hass.async_create_task(...) and returns None immediately (matching
-    HA's real websocket dispatch — fire-and-forget). Awaiting the wrapper
-    directly (as you can with plain @callback handlers like ws_get_stats)
-    raises "TypeError: object NoneType can't be used in 'await' expression".
-    This helper captures the coroutine that would have been scheduled via
-    hass.async_create_task and awaits it directly instead.
+    via hass.async_create_background_task(coro, name, eager_start=True) and
+    returns None immediately (matching HA's real websocket dispatch —
+    fire-and-forget). Awaiting the wrapper directly (as you can with plain
+    @callback handlers like ws_get_stats) raises "TypeError: object NoneType
+    can't be used in 'await' expression".
+
+    Confirmed against the installed homeassistant.components.websocket_api
+    source: the method is async_create_background_task, not async_create_task
+    (easy to miss — both exist on HomeAssistant and only one is used here).
+    Accepts any positional/keyword args after the coroutine so it doesn't
+    silently break again if HA adds/renames arguments in a future version.
     """
-    scheduled = {}
-    hass.async_create_task = lambda coro: scheduled.setdefault("coro", coro)
+    tasks: list = []
+
+    def fake_create_background_task(coro, *args, **kwargs):
+        task = asyncio.ensure_future(coro)
+        tasks.append(task)
+        return task
+
+    hass.async_create_background_task = fake_create_background_task
     func(hass, connection, msg)
-    await scheduled["coro"]
+    assert tasks, "hass.async_create_background_task was not called — async_response wrapper behaviour may have changed"
+    await asyncio.gather(*tasks)
 
 
 class TestWsAddManualEntry:
