@@ -264,19 +264,30 @@ class TestRepairIssues:
 # ── _get_data snapshot ─────────────────────────────────────────────────────
 
 class TestGetData:
+    """v2.16.0: _get_data() now delegates monthly/daily views to PeriodTracker
+    (coordinator._monthly_tracker / ._daily_tracker) instead of reading
+    coordinator.monthly / ._pending directly. Tests build real PeriodTracker
+    instances and inject them, then assert on the resulting view.
+    """
 
-    def _make_coord(self, monthly_loaded=True, current_user="flemming",
+    def _make_coord(self, current_user="flemming",
                     acc_time=100.0, acc_energy=0.5, acc_cost=1.2,
-                    monthly=None, pending=None):
+                    monthly_tracker=None, daily_tracker=None):
+        from custom_components.pc_user_statistics.period_tracker import PeriodTracker
+
         coord = MagicMock()
-        coord._monthly_loaded = monthly_loaded
         coord.current_user = current_user
         coord.acc_time = acc_time
         coord.acc_energy = acc_energy
         coord.acc_cost = acc_cost
         coord.tracked_users = ["flemming"]
-        coord.monthly = monthly or {"flemming": {"time": 3600.0, "energy": 1.0, "cost": 3.0}}
-        coord._pending = pending or {}
+        coord._monthly_tracker = monthly_tracker or PeriodTracker("month", ["flemming"])
+        coord._daily_tracker = daily_tracker or PeriodTracker("day", ["flemming"])
+        coord._monthly_loaded = coord._monthly_tracker.loaded
+        coord._daily_loaded = coord._daily_tracker.loaded
+        coord._price_fallback_count = 0
+        coord._last_valid_price = 0.0
+        coord._is_price_entity_ok = MagicMock(return_value=True)
 
         from custom_components.pc_user_statistics.__init__ import PCStatisticsCoordinator
         coord._get_data = PCStatisticsCoordinator._get_data.__get__(coord)
@@ -295,20 +306,61 @@ class TestGetData:
         assert data["acc_cost"] == 2.5
 
     def test_monthly_loaded_returns_monthly(self):
-        monthly = {"flemming": {"time": 3600.0, "energy": 1.0, "cost": 3.0}}
-        coord = self._make_coord(monthly_loaded=True, monthly=monthly)
+        from custom_components.pc_user_statistics.period_tracker import PeriodTracker
+        tracker = PeriodTracker("month", ["flemming"])
+        tracker.totals = {"flemming": {"time": 3600.0, "energy": 1.0, "cost": 3.0}}
+        tracker.loaded = True
+        coord = self._make_coord(monthly_tracker=tracker)
         data = coord._get_data()
         assert data["monthly"]["flemming"]["time"] == 3600.0
+        assert data["monthly_loaded"] is True
 
     def test_monthly_not_loaded_merges_pending(self):
-        # monthly must have all tracked_users as keys (zeroed out at startup)
-        monthly = {"flemming": {"time": 0.0, "energy": 0.0, "cost": 0.0}}
-        pending = {"flemming": {"time": 60.0, "energy": 0.1, "cost": 0.3}}
-        coord = self._make_coord(monthly_loaded=False, monthly=monthly, pending=pending)
+        from custom_components.pc_user_statistics.period_tracker import PeriodTracker
+        tracker = PeriodTracker("month", ["flemming"])
+        tracker.pending = {"flemming": {"time": 60.0, "energy": 0.1, "cost": 0.3}}
+        tracker.loaded = False  # totals stay all-zero, pending gets merged by view()
+        coord = self._make_coord(monthly_tracker=tracker)
         data = coord._get_data()
-        # pending is merged: 0.0 + 60.0 = 60.0
+        # pending is merged: 0.0 (totals) + 60.0 (pending) = 60.0
         assert data["monthly"]["flemming"]["time"] == 60.0
         assert data["monthly_loaded"] is False
+
+    def test_daily_loaded_returns_daily(self):
+        from custom_components.pc_user_statistics.period_tracker import PeriodTracker
+        tracker = PeriodTracker("day", ["flemming"])
+        tracker.totals = {"flemming": {"time": 1800.0, "energy": 0.4, "cost": 1.1}}
+        tracker.loaded = True
+        coord = self._make_coord(daily_tracker=tracker)
+        data = coord._get_data()
+        assert data["daily"]["flemming"]["time"] == 1800.0
+        assert data["daily_loaded"] is True
+
+    def test_daily_not_loaded_merges_pending(self):
+        from custom_components.pc_user_statistics.period_tracker import PeriodTracker
+        tracker = PeriodTracker("day", ["flemming"])
+        tracker.pending = {"flemming": {"time": 45.0, "energy": 0.05, "cost": 0.15}}
+        tracker.loaded = False
+        coord = self._make_coord(daily_tracker=tracker)
+        data = coord._get_data()
+        assert data["daily"]["flemming"]["time"] == 45.0
+        assert data["daily_loaded"] is False
+
+    def test_monthly_and_daily_are_independent(self):
+        """Regression guard: the v2.15.0 bug was monthly/daily accidentally
+        sharing state. Confirms the two trackers stay fully independent.
+        """
+        from custom_components.pc_user_statistics.period_tracker import PeriodTracker
+        monthly_tracker = PeriodTracker("month", ["flemming"])
+        monthly_tracker.totals = {"flemming": {"time": 360000.0, "energy": 50.0, "cost": 150.0}}
+        monthly_tracker.loaded = True
+        daily_tracker = PeriodTracker("day", ["flemming"])
+        daily_tracker.totals = {"flemming": {"time": 1800.0, "energy": 0.4, "cost": 1.1}}
+        daily_tracker.loaded = True
+        coord = self._make_coord(monthly_tracker=monthly_tracker, daily_tracker=daily_tracker)
+        data = coord._get_data()
+        assert data["monthly"]["flemming"]["time"] == 360000.0
+        assert data["daily"]["flemming"]["time"] == 1800.0
 
 
 # ── _schedule_session_flush liveness guard (Fix 2) ─────────────────────────

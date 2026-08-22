@@ -1,7 +1,20 @@
 # File Name: __init__.py
-# Version: 2.15.0
+# Version: 2.16.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
 # Last Updated: July 17, 2026
+#
+# Changes in 2.16.0:
+#   REFACTOR: self.monthly/self._pending and self.daily/self._daily_pending —
+#        two near-identical parallel implementations of the same bookkeeping —
+#        replaced with a single PeriodTracker class (period_tracker.py), one
+#        instance per period (self._monthly_tracker, self._daily_tracker).
+#        No behavioral change: same floor-against-baseline logic, same
+#        pending-buffer-before-load semantics, same rollover reset. Pure
+#        deduplication so the next fix to this logic (the daily tracker
+#        itself was born from a bug caused by this duplication) only needs
+#        to be made once. self.monthly / self.daily / self._monthly_loaded /
+#        self._daily_loaded remain available with identical read/write
+#        semantics via thin properties, so no other file needed to change.
 #
 # Changes in 2.15.0:
 #   NEW: Daily ("today") totals tracker — self.daily, mirroring self.monthly
@@ -218,6 +231,7 @@ from .const import (
 from .helpers import safe_float_from_state, parse_influxdb_response
 from .store import NotificationStore
 from .notification_manager import NotificationManager
+from .period_tracker import PeriodTracker
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -462,30 +476,14 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # load. This prevents double-counting: if a delta is written to InfluxDB
         # before the load completes, it would appear in both the InfluxDB SUM
         # and self.monthly if we accumulated there directly.
-        self.monthly: dict[str, dict[str, float]] = {
-            user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-            for user in self.tracked_users
-        }
-        self._pending: dict[str, dict[str, float]] = {
-            user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-            for user in self.tracked_users
-        }
-        # True once _async_load_monthly_data() has successfully set self.monthly
-        self._monthly_loaded: bool = False
-
-        # Daily ("today") totals (v2.15.0) — same pattern as monthly above,
-        # reset at local midnight instead of month-end. Added so the
-        # Statistik tab's MS Family Safety comparison has a real "today" PC
-        # total to compare against, instead of accidentally using the month.
-        self.daily: dict[str, dict[str, float]] = {
-            user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-            for user in self.tracked_users
-        }
-        self._daily_pending: dict[str, dict[str, float]] = {
-            user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-            for user in self.tracked_users
-        }
-        self._daily_loaded: bool = False
+        # v2.16.0 — monthly and daily bookkeeping (totals / pending-before-load
+        # buffer / loaded flag / baseline-floor merge) now live in a shared
+        # PeriodTracker (period_tracker.py) instead of two hand-duplicated sets
+        # of attributes. self.monthly / self.daily / self._monthly_loaded /
+        # self._daily_loaded below are thin properties delegating to these —
+        # see the property definitions after __init__ for details.
+        self._monthly_tracker = PeriodTracker("month", self.tracked_users)
+        self._daily_tracker = PeriodTracker("day", self.tracked_users)
 
         # ── Timing ────────────────────────────────────────────────────────
         self.last_time: float = time.time()
@@ -574,6 +572,36 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         # first load would run with no baseline to protect against.
 
         _LOGGER.debug("PCStatisticsCoordinator initialized (entry: %s)", config_entry.entry_id)
+
+    # ── PeriodTracker compatibility properties (v2.16.0) ───────────────────
+    # Thin delegation so every other file (websocket.py, sensor.py,
+    # diagnostics.py, system_health.py) and the rest of this file can keep
+    # reading/writing self.monthly, self.daily, self._monthly_loaded,
+    # self._daily_loaded exactly as before the PeriodTracker refactor.
+
+    @property
+    def monthly(self) -> dict[str, dict[str, float]]:
+        return self._monthly_tracker.totals
+
+    @property
+    def daily(self) -> dict[str, dict[str, float]]:
+        return self._daily_tracker.totals
+
+    @property
+    def _monthly_loaded(self) -> bool:
+        return self._monthly_tracker.loaded
+
+    @_monthly_loaded.setter
+    def _monthly_loaded(self, value: bool) -> None:
+        self._monthly_tracker.loaded = value
+
+    @property
+    def _daily_loaded(self) -> bool:
+        return self._daily_tracker.loaded
+
+    @_daily_loaded.setter
+    def _daily_loaded(self, value: bool) -> None:
+        self._daily_tracker.loaded = value
 
     async def _async_verify_influxdb(self) -> None:
         """Ping InfluxDB to verify connectivity at setup time.
@@ -805,43 +833,20 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             field_mappings = {"time": 1, "energy": 2, "cost": 3}
             parsed_data = parse_influxdb_response(data, field_mappings)
 
-            new_monthly: dict[str, dict[str, float]] = {
+            new_monthly_raw: dict[str, dict[str, float]] = {
                 user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
                 for user in self.tracked_users
             }
             for user, values in parsed_data.items():
-                if user in new_monthly:
+                if user in new_monthly_raw:
                     for key, val in values.items():
-                        new_monthly[user][key] = float(val or 0)
+                        new_monthly_raw[user][key] = float(val or 0)
 
-            # v2.14.0 — floor: never let InfluxDB's sum show less than the
-            # last known-good baseline. A lower InfluxDB value at this point
-            # means InfluxDB is missing writes that were already tracked and
-            # displayed — not that the true total decreased.
+            # v2.14.0 floor + pending-merge, v2.16.0 delegated to PeriodTracker:
+            # never let InfluxDB's sum show less than the last known-good
+            # baseline, and fold in any deltas accumulated before load completed.
             baseline = self._persisted_monthly_baseline or {}
-            for user in self.tracked_users:
-                b = baseline.get(user, {})
-                for key in ("time", "energy", "cost"):
-                    floor_val = b.get(key, 0.0)
-                    if new_monthly[user][key] < floor_val:
-                        _LOGGER.warning(
-                            "Monthly %s for '%s' from InfluxDB (%.2f) is lower than the "
-                            "last known baseline (%.2f) — keeping the higher value. This "
-                            "usually means InfluxDB is missing recent writes (e.g. after "
-                            "an outage) rather than the true total having decreased.",
-                            key, user, new_monthly[user][key], floor_val,
-                        )
-                        new_monthly[user][key] = floor_val
-
-            # Merge in any deltas accumulated before load completed
-            for user in self.tracked_users:
-                pending = self._pending.get(user, {})
-                for key in ("time", "energy", "cost"):
-                    new_monthly[user][key] += pending.get(key, 0.0)
-
-            self.monthly = new_monthly
-            self._pending = {}  # No longer needed — monthly is now authoritative
-            self._monthly_loaded = True
+            self._monthly_tracker.load_from_influx(new_monthly_raw, baseline)
             _LOGGER.info(
                 "Monthly data loaded from InfluxDB: %s",
                 {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in self.monthly.items()},
@@ -877,15 +882,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     max_retries, err,
                     {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in baseline.items()} or "none available",
                 )
-                self.monthly = {
-                    user: {
-                        "time":   baseline.get(user, {}).get("time", 0.0),
-                        "energy": baseline.get(user, {}).get("energy", 0.0),
-                        "cost":   baseline.get(user, {}).get("cost", 0.0),
-                    }
-                    for user in self.tracked_users
-                }
-                self._monthly_loaded = True
+                self._monthly_tracker.load_fallback(baseline)
 
         except Exception as err:
             _LOGGER.exception("Unexpected error loading monthly data: %s", err)
@@ -925,36 +922,19 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             field_mappings = {"time": 1, "energy": 2, "cost": 3}
             parsed_data = parse_influxdb_response(data, field_mappings)
 
-            new_daily: dict[str, dict[str, float]] = {
+            new_daily_raw: dict[str, dict[str, float]] = {
                 user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
                 for user in self.tracked_users
             }
             for user, values in parsed_data.items():
-                if user in new_daily:
+                if user in new_daily_raw:
                     for key, val in values.items():
-                        new_daily[user][key] = float(val or 0)
+                        new_daily_raw[user][key] = float(val or 0)
 
+            # v2.16.0 — floor + pending-merge delegated to PeriodTracker (see
+            # _async_load_monthly_data for the equivalent monthly comment).
             baseline = self._persisted_daily_baseline or {}
-            for user in self.tracked_users:
-                b = baseline.get(user, {})
-                for key in ("time", "energy", "cost"):
-                    floor_val = b.get(key, 0.0)
-                    if new_daily[user][key] < floor_val:
-                        _LOGGER.warning(
-                            "Daily %s for '%s' from InfluxDB (%.2f) is lower than the "
-                            "last known baseline (%.2f) — keeping the higher value.",
-                            key, user, new_daily[user][key], floor_val,
-                        )
-                        new_daily[user][key] = floor_val
-
-            for user in self.tracked_users:
-                pending = self._daily_pending.get(user, {})
-                for key in ("time", "energy", "cost"):
-                    new_daily[user][key] += pending.get(key, 0.0)
-
-            self.daily = new_daily
-            self._daily_pending = {}
-            self._daily_loaded = True
+            self._daily_tracker.load_from_influx(new_daily_raw, baseline)
             _LOGGER.info(
                 "Daily data loaded from InfluxDB: %s",
                 {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in self.daily.items()},
@@ -987,15 +967,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     "Falling back to last known baseline instead of resetting to 0.",
                     max_retries, err,
                 )
-                self.daily = {
-                    user: {
-                        "time":   baseline.get(user, {}).get("time", 0.0),
-                        "energy": baseline.get(user, {}).get("energy", 0.0),
-                        "cost":   baseline.get(user, {}).get("cost", 0.0),
-                    }
-                    for user in self.tracked_users
-                }
-                self._daily_loaded = True
+                self._daily_tracker.load_fallback(baseline)
 
         except Exception as err:
             _LOGGER.exception("Unexpected error loading daily data: %s", err)
@@ -1141,15 +1113,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     "Month rolled over (%d → %d) — resetting monthly totals and reloading from InfluxDB",
                     self.last_month, current_month,
                 )
-                self.monthly = {
-                    user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-                    for user in self.tracked_users
-                }
-                self._pending = {
-                    user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-                    for user in self.tracked_users
-                }
-                self._monthly_loaded = False
+                self._monthly_tracker.reset()
                 self._price_fallback_count = 0
                 # v2.14.0 — a new month starts fresh, so last month's baseline
                 # floor must NOT carry over (it would wrongly inflate the new
@@ -1167,15 +1131,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                     "Day rolled over (%s → %s) — resetting daily totals and reloading from InfluxDB",
                     self.last_day, current_day,
                 )
-                self.daily = {
-                    user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-                    for user in self.tracked_users
-                }
-                self._daily_pending = {
-                    user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-                    for user in self.tracked_users
-                }
-                self._daily_loaded = False
+                self._daily_tracker.reset()
                 # New day starts fresh — last day's baseline floor must not
                 # carry over (same reasoning as the monthly reset above).
                 self._persisted_daily_baseline = {}
@@ -1331,17 +1287,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.acc_energy += energy_delta
         self.acc_cost   += cost_delta
 
-        target = self.monthly if self._monthly_loaded else self._pending
-        if self.current_user in target:
-            target[self.current_user]["time"]   += delta_time
-            target[self.current_user]["energy"] += energy_delta
-            target[self.current_user]["cost"]   += cost_delta
-
-        daily_target = self.daily if self._daily_loaded else self._daily_pending
-        if self.current_user in daily_target:
-            daily_target[self.current_user]["time"]   += delta_time
-            daily_target[self.current_user]["energy"] += energy_delta
-            daily_target[self.current_user]["cost"]   += cost_delta
+        self._monthly_tracker.apply_delta(self.current_user, delta_time, energy_delta, cost_delta)
+        self._daily_tracker.apply_delta(self.current_user, delta_time, energy_delta, cost_delta)
 
         time_since_write = now - self.last_write_time
         if force_write or time_since_write >= WRITE_THRESHOLD:
@@ -1623,29 +1570,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
     def _get_data(self) -> dict[str, Any]:
         """Return current data snapshot for coordinator listeners and sensors."""
-        if self._monthly_loaded:
-            monthly_view = self.monthly
-        else:
-            monthly_view = {
-                user: {
-                    "time":   self.monthly[user]["time"]   + self._pending.get(user, {}).get("time", 0.0),
-                    "energy": self.monthly[user]["energy"] + self._pending.get(user, {}).get("energy", 0.0),
-                    "cost":   self.monthly[user]["cost"]   + self._pending.get(user, {}).get("cost", 0.0),
-                }
-                for user in self.tracked_users
-            }
-
-        if self._daily_loaded:
-            daily_view = self.daily
-        else:
-            daily_view = {
-                user: {
-                    "time":   self.daily[user]["time"]   + self._daily_pending.get(user, {}).get("time", 0.0),
-                    "energy": self.daily[user]["energy"] + self._daily_pending.get(user, {}).get("energy", 0.0),
-                    "cost":   self.daily[user]["cost"]   + self._daily_pending.get(user, {}).get("cost", 0.0),
-                }
-                for user in self.tracked_users
-            }
+        monthly_view = self._monthly_tracker.view()
+        daily_view = self._daily_tracker.view()
 
         return {
             "current_user":   self.current_user,

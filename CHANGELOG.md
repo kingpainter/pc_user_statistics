@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
+## [Backend] __init__.py 2.16.0 - 2026-08-22
+
+### Changed
+
+- **Monthly og daily totals-bogføring samlet i én `PeriodTracker`-klasse** (ny fil `period_tracker.py`, bruges fra `__init__.py`):
+  - **Baggrund**: `self.monthly`/`self._pending` og `self.daily`/`self._daily_pending` var to hånd-duplikerede implementeringer af samme logik (totals, pending-buffer før InfluxDB-load, baseline-floor-merge, rollover-reset). Daily-trackeren (v2.15.0) opstod netop som en bugfix for at denne duplikering havde fået "i dag"-sammenligningen til fejlagtigt at bruge månedstotalen.
+  - **Ændring**: `PeriodTracker(period, tracked_users)` indkapsler nu bogføringen rent (ingen I/O — InfluxDB-kald og NotificationStore bliver i coordinatoren). `self._monthly_tracker` og `self._daily_tracker` erstatter de gamle attributter internt.
+  - **Ingen adfærdsændring**: `self.monthly`, `self.daily`, `self._monthly_loaded`, `self._daily_loaded` findes stadig — nu som properties der delegerer til trackerne — så `websocket.py`, `sensor.py`, `diagnostics.py` og `system_health.py` er uændrede.
+  - **Tests**: Ny `tests/test_period_tracker.py` (23 isolerede tests, ingen HA-mocking påkrævet). `tests/test_init.py::TestGetData` opdateret til at bygge rigtige `PeriodTracker`-instanser i stedet for at sætte `coordinator.monthly`/`._pending` direkte, plus nye tests for daily-view og monthly/daily-uafhængighed.
+
+
+---
 ## [Frontend] pc-user-statistics-cards.js 2.6.12 - 2026-08-21
 
 ### Fixed
