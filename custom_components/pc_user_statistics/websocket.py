@@ -1,7 +1,23 @@
 # File Name: websocket.py
-# Version: 3.6.0
+# Version: 3.7.0
 # Description: WebSocket API for the PC User Statistics panel.
-# Last Updated: July 17, 2026
+# Last Updated: September 10, 2026
+#
+# Changes in 3.7.0:
+#   InfluxDB/VictoriaMetrics removed (see __init__.py 2.17.0 changelog):
+#     - _query_history(): InfluxDB `GROUP BY time(1d)` query replaced by HA
+#       recorder statistics (period="day", types={"change"}) on the
+#       monthly_time/monthly_energy/monthly_cost entities. Response shape
+#       unchanged, except every tracked user is now always included
+#       (zero-filled) rather than omitted when they had zero activity in
+#       the window — see that function's docstring.
+#     - ws_add_manual_entry(): error message updated — the failure mode is
+#       now "date outside the current month/day", not a write failure.
+#     - ws_get_system()/ws_get_health(): influxdb_host/port/database removed
+#       (replaced by data_source); buffer_size/buffer_max/consec_failures
+#       hardcoded to 0 — there's no more write buffer to report on.
+#       NOTE: panel.js's Admin tab was not checked as part of this change —
+#       it likely still has labels for the removed InfluxDB fields.
 #
 # Changes in 3.6.0:
 #   NEW: ws_get_stats now also returns `daily` and `daily_loaded` — the new
@@ -135,11 +151,17 @@ def ws_get_stats(hass, connection, msg):
 @websocket_api.websocket_command({"type": f"{DOMAIN}/get_system"})
 @callback
 def ws_get_system(hass, connection, msg):
+    """v2.17.0: influxdb_host/port/database and buffer_size/buffer_max are
+    gone — there's no external DB to report on anymore. Fields kept for
+    frontend compatibility where cheap (buffer_size/buffer_max hardcoded to
+    0), replaced with data_source where not. NOTE: panel.js's Admin tab
+    likely still has labels for the removed fields — needs a matching
+    frontend update, not verified from this file alone.
+    """
     coordinator = _get_coordinator(hass)
     if not coordinator:
         connection.send_error(msg["id"], "not_ready", "Integration not ready"); return
     try:
-        cfg = dict(coordinator.config) if coordinator.config else {}
         import time as _time
         now = _time.time()
         try:
@@ -160,15 +182,13 @@ def ws_get_system(hass, connection, msg):
             except Exception:
                 last_write_str = "ukendt"
 
-        monthly_str = "Indlæst ✓" if coordinator._monthly_loaded else "Afventer InfluxDB..."
+        monthly_str = "Indlæst ✓" if coordinator._monthly_loaded else "Indlæser..."
 
         connection.send_result(msg["id"], {
             "version": __version__,
-            "influxdb_host": cfg.get("host", "unknown"),
-            "influxdb_port": cfg.get("port", 8086),
-            "influxdb_database": cfg.get("database", "unknown"),
-            "buffer_size": len(coordinator.failed_writes),
-            "buffer_max": 100,
+            "data_source": "Home Assistant statistics",
+            "buffer_size": 0,
+            "buffer_max": 0,
             "tracked_users": coordinator.tracked_users,
             "user_map": coordinator.user_map,
             "current_user": coordinator.current_user or "ingen",
@@ -208,10 +228,9 @@ def ws_get_health(hass, connection, msg):
         last_flush = getattr(coordinator, "_last_session_flush", 0.0)
         flush_age_s = int(now - last_flush) if last_flush > 0 else None
 
-        # ── InfluxDB write info ───────────────────────────────────────────────
+        # ── Last delta applied (v2.17.0: no longer an InfluxDB write) ─────────
         last_write = float(getattr(coordinator, "last_write_time", 0.0) or 0)
         write_age_s = int(now - last_write) if last_write > 0 else None
-        consec_failures = getattr(coordinator, "_consecutive_write_failures", 0)
 
         connection.send_result(msg["id"], {
             # Session
@@ -224,11 +243,11 @@ def ws_get_health(hass, connection, msg):
             "last_flush_age_s":  flush_age_s,
             "flush_timer_active": coordinator._session_flush_cancel is not None,
             "flush_interval_s":   60,
-            # InfluxDB
+            # Last update
             "write_age_s":       write_age_s,
-            "buffer_size":       len(coordinator.failed_writes),
-            "buffer_max":        100,
-            "consec_failures":   consec_failures,
+            "buffer_size":       0,
+            "buffer_max":        0,
+            "consec_failures":   0,
             # Monthly data
             "monthly_loaded":    coordinator._monthly_loaded,
             # Price fallback
@@ -446,9 +465,11 @@ async def ws_save_devices(hass, connection, msg):
 async def ws_add_manual_entry(hass, connection, msg):
     """Add a manual time/energy/cost correction for a missed session.
 
-    Writes a single point to InfluxDB tagged source=manual via
-    coordinator.async_add_manual_entry(). Intended for rare cases where
-    automatic tracking lost a session (e.g. files overwritten mid-session).
+    v2.17.0: applies the correction directly to the in-memory monthly/daily
+    trackers via coordinator.async_add_manual_entry() — no more InfluxDB
+    write. Intended for rare cases where automatic tracking lost a session
+    (e.g. files overwritten mid-session). Only affects totals for a date
+    within the current month/day — see async_add_manual_entry()'s docstring.
     """
     coordinator = _get_coordinator(hass)
     if not coordinator:
@@ -481,7 +502,10 @@ async def ws_add_manual_entry(hass, connection, msg):
             cost_delta=msg.get("cost_dkk", 0.0),
         )
         if not success:
-            connection.send_error(msg["id"], "write_failed", "Could not write to InfluxDB")
+            connection.send_error(
+                msg["id"], "write_failed",
+                "Date is outside the current month — cannot apply correction",
+            )
             return
 
         connection.send_result(msg["id"], {"success": True})
@@ -498,7 +522,11 @@ async def ws_add_manual_entry(hass, connection, msg):
 })
 @websocket_api.async_response
 async def ws_get_history(hass, connection, msg):
-    """Query InfluxDB for daily totals per user over the last N days."""
+    """Return daily totals per user over the last N days.
+
+    v2.17.0: sourced from HA's own recorder statistics instead of InfluxDB —
+    see _query_history().
+    """
     coordinator = _get_coordinator(hass)
     if not coordinator:
         connection.send_error(msg["id"], "not_ready", "Integration not ready")
@@ -513,73 +541,72 @@ async def ws_get_history(hass, connection, msg):
 
 
 async def _query_history(coordinator, days: int) -> dict:
-    """Run InfluxDB GROUP BY time(1d) query and return structured data.
+    """Return day-by-day time/energy/cost totals per user over the last N days.
 
-    Fix 6: reuses coordinator._http_session (auth pre-configured, persistent
-    TCP connection) instead of opening a new ClientSession per request.
+    v2.17.0: replaces the InfluxDB `GROUP BY time(1d)` query with HA's own
+    recorder long-term statistics (period="day", types={"change"}) on the
+    same monthly_time/monthly_energy/monthly_cost entities the monthly/daily
+    totals are read from (see __init__.py _async_sum_period_from_statistics
+    and coordinator._entity_id_for()). HA's day-period bucketing already
+    uses the HA instance's configured timezone for day boundaries — matching
+    the old explicit tz('Europe/Copenhagen') with no extra handling needed.
+
+    Response shape is unchanged from the InfluxDB version:
+    {"days": [...], "users": [...], "series": {user: {day: {time,energy,cost}}}}
+    — one difference: every tracked user is always included, zero-filled,
+    even with zero activity in the window (the old fill(0) only filled gaps
+    within a user's existing InfluxDB series; a user with literally no
+    points in the window was omitted from "users"/"series" entirely).
     """
-    import urllib.parse
     from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.components.recorder.statistics import statistics_during_period
+    from .const import LOCAL_TIMEZONE
 
-    cfg = coordinator.config
-    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
+    hass = coordinator.hass
+    start = datetime.now(timezone.utc) - timedelta(days=days)
+    end = datetime.now(timezone.utc)
+    stats_engine = get_instance(hass)
+    sensor_keys = {"time": "monthly_time", "energy": "monthly_energy", "cost": "monthly_cost"}
 
-    query = (
-        f'SELECT SUM("time_delta") AS "time", '
-        f'SUM("energy_delta") AS "energy", '
-        f'SUM("cost_delta") AS "cost" '
-        f'FROM pc_usage '
-        f'WHERE time >= \'{start}\' '
-        f'GROUP BY time(1d), "user" fill(0) tz(\'Europe/Copenhagen\')'
-    )
+    now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
+    all_days = [
+        (now_local.date() - timedelta(days=offset)).isoformat()
+        for offset in range(days - 1, -1, -1)
+    ]
 
-    try:
-        params = urllib.parse.urlencode({"q": query, "db": cfg["database"]})
-        async with coordinator._http_session.get(
-            f"{coordinator._influx_base_url}/query?{params}",
-            timeout=coordinator._http_session.timeout,
-        ) as resp:
-            if resp.status != 200:
-                return {"days": [], "users": [], "series": {}}
-            data = await resp.json()
-    except Exception as err:
-        _LOGGER.warning("History query failed: %s", err)
-        return {"days": [], "users": [], "series": {}}
-
-    # Parse response
-    results = data.get("results", [{}])
-    series_list = results[0].get("series", []) if results else []
-
-    all_days: list[str] = []
     user_series: dict[str, dict[str, dict]] = {}
-
-    for s in series_list:
-        user = s.get("tags", {}).get("user", "unknown")
-        cols = s.get("columns", [])
-        vals = s.get("values", [])
-
-        try:
-            t_idx = cols.index("time")
-            tm_idx = cols.index("time", t_idx + 1) if cols.count("time") > 1 else 1
-            e_idx  = cols.index("energy")
-            c_idx  = cols.index("cost")
-        except ValueError:
-            tm_idx, e_idx, c_idx = 1, 2, 3
-
-        user_series[user] = {}
-        for row in vals:
-            day = row[0][:10] if row[0] else ""
-            if not day:
+    for user in coordinator.tracked_users:
+        day_totals: dict[str, dict[str, float]] = {
+            d: {"time": 0.0, "energy": 0.0, "cost": 0.0} for d in all_days
+        }
+        for key, sensor_key in sensor_keys.items():
+            entity_id = coordinator._entity_id_for(user, sensor_key)
+            if entity_id is None:
                 continue
-            if day not in all_days:
-                all_days.append(day)
-            user_series[user][day] = {
-                "time":   float(row[tm_idx] or 0),
-                "energy": float(row[e_idx]  or 0),
-                "cost":   float(row[c_idx]  or 0),
-            }
-
-    all_days.sort()
+            try:
+                stats = await stats_engine.async_add_executor_job(
+                    statistics_during_period,
+                    hass, start, end, {entity_id}, "day", None, {"change"},
+                )
+            except Exception as err:
+                _LOGGER.warning(
+                    "History statistics query failed for %s/%s: %s", user, sensor_key, err,
+                )
+                continue
+            for row in stats.get(entity_id, []):
+                row_start = row.get("start")
+                if row_start is None:
+                    continue
+                day = (
+                    datetime.fromtimestamp(row_start, tz=timezone.utc)
+                    .astimezone(ZoneInfo(LOCAL_TIMEZONE))
+                    .strftime("%Y-%m-%d")
+                )
+                if day in day_totals:
+                    day_totals[day][key] = row.get("change") or 0.0
+        user_series[user] = day_totals
 
     return {
         "days":   all_days,

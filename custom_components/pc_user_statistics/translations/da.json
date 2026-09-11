@@ -2,21 +2,9 @@
   "config": {
     "step": {
       "user": {
-        "title": "Konfigurer PC Bruger Statistik",
-        "description": "Indtast InfluxDB detaljer for at spore strømforbrug, spilletid og omkostninger for gaming-PC'en.",
-        "data": {
-          "host": "Vært",
-          "port": "Port",
-          "database": "Database",
-          "username": "Brugernavn",
-          "password": "Adgangskode"
-        }
+        "title": "Opsæt PC Bruger Statistik",
+        "description": "Spor strømforbrug, spilletid og omkostninger for gaming-PC'en via Home Assistants egen historik — ingen ekstern database nødvendig. Sporede brugere konfigureres bagefter."
       }
-    },
-    "error": {
-      "cannot_connect": "Kan ikke oprette forbindelse til InfluxDB. Kontroller vært, port og legitimationsoplysninger.",
-      "invalid_config": "Ugyldig konfiguration. Kontroller alle felter.",
-      "unknown": "Ukendt fejl opstod under opsætning."
     },
     "abort": {
       "already_configured": "Denne integration er allerede konfigureret."
@@ -61,12 +49,6 @@
       "monthly_cost": {
         "name": "Månedlig omkostning"
       }
-    }
-  },
-  "issues": {
-    "influxdb_unreachable": {
-      "title": "InfluxDB er ikke tilgængelig",
-      "description": "PC Bruger Statistik har fejlet ved at skrive data til InfluxDB {consecutive_failures} gange i træk. Statistikdata kan være gået tabt.\n\nKontroller at InfluxDB kører og er tilgængelig, og genindlæs derefter integrationen.\n\n**Indstillinger → Enheder og tjenester → PC Bruger Statistik → ⋮ → Genindlæs**\n\nHvis legitimationsoplysningerne er ændret, brug **Genkonfigurer** i stedet."
     }
   }
 }

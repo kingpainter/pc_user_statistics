@@ -1,15 +1,14 @@
 {
   "domain": "pc_user_statistics",
   "name": "PC User Statistics",
-  "version": "2.12.1",
+  "version": "2.17.0",
   "documentation": "https://github.com/kingpainter/pc_user_statistics",
   "issue_tracker": "https://github.com/kingpainter/pc_user_statistics/issues",
-  "requirements": [
-    "aiohttp>=3.8.0"
-  ],
+  "requirements": [],
   "dependencies": [
     "frontend",
-    "http"
+    "http",
+    "recorder"
   ],
   "codeowners": [
     "@kingpainter"

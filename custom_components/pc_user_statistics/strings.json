@@ -2,21 +2,9 @@
   "config": {
     "step": {
       "user": {
-        "title": "Configure PC User Statistics",
-        "description": "Enter InfluxDB details to track power consumption, game time, and costs for the gaming PC.",
-        "data": {
-          "host": "Host",
-          "port": "Port",
-          "database": "Database",
-          "username": "Username",
-          "password": "Password"
-        }
+        "title": "Set up PC User Statistics",
+        "description": "Track power consumption, game time, and costs for the gaming PC using Home Assistant's own history — no external database needed. Tracked users are configured next, after setup."
       }
-    },
-    "error": {
-      "cannot_connect": "Cannot connect to InfluxDB. Check host, port, and credentials.",
-      "invalid_config": "Invalid configuration. Please check all fields.",
-      "unknown": "Unknown error occurred during setup."
     },
     "abort": {
       "already_configured": "This integration is already configured."
@@ -61,12 +49,6 @@
       "monthly_cost": {
         "name": "Monthly cost"
       }
-    }
-  },
-  "issues": {
-    "influxdb_unreachable": {
-      "title": "InfluxDB is unreachable",
-      "description": "PC User Statistics has failed to write data to InfluxDB {consecutive_failures} times in a row. Statistics data may be lost.\n\nCheck that InfluxDB is running and accessible, then reload the integration.\n\n**Settings → Devices & Services → PC User Statistics → ⋮ → Reload**\n\nIf credentials have changed, use **Reconfigure** instead."
     }
   }
 }

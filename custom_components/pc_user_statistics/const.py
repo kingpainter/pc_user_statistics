@@ -1,13 +1,27 @@
 # File Name: const.py
-# Version: 2.15.0
+# Version: 2.17.0
 # Description: Constants for the PC User Statistics integration.
-# Last Updated: July 17, 2026
+# Last Updated: September 10, 2026
+#
+# Changes in 2.17.0:
+#   InfluxDB/VictoriaMetrics removed — monthly/daily totals and the history
+#   graph are now sourced from Home Assistant's own long-term statistics
+#   (see __init__.py _async_sum_period_from_statistics). Removed the
+#   InfluxDB-only constants (MEASUREMENT, DEFAULT_DATABASE, WRITE_THRESHOLD,
+#   MAX_BUFFERED_WRITES, MAX_RETRY_ATTEMPTS — the retry/backoff buffer they
+#   configured no longer exists, deltas now apply every poll).
+#   monthly_cost changed from state_class TOTAL to TOTAL_INCREASING to match
+#   monthly_time/monthly_energy — TOTAL requires an explicit last_reset
+#   attribute to reset correctly at monthly rollover (which this integration
+#   never set), so its long-term "sum" statistic would have been silently
+#   corrupted every month once something actually read it. TOTAL_INCREASING
+#   auto-detects the drop-to-0 as a meter reset instead, same as the other two.
 
 from typing import Final
 
 # Integration metadata
 DOMAIN: Final = "pc_user_statistics"
-__version__: Final = "2.15.0"
+__version__: Final = "2.17.0"
 
 # Device identifiers
 HUB_DEVICE_ID: Final = "statistics_hub"
@@ -40,31 +54,20 @@ DEFAULT_USERS: Final = ["flemming", "lukas", "sebastian"]
 USER_MAP: Final = DEFAULT_USER_MAP
 USERS: Final = DEFAULT_USERS
 
-# InfluxDB configuration
-MEASUREMENT: Final = "pc_usage"
-DEFAULT_DATABASE: Final = "homeassistant"
-
-# Update intervals (seconds)
+# Update interval (seconds) — how often the coordinator polls and applies
+# deltas to the monthly/daily trackers. This drives the monthly_*/daily
+# sensors' own state updates, which is what HA's recorder observes to build
+# the long-term statistics _async_sum_period_from_statistics() reads back.
 UPDATE_INTERVAL: Final = 60
-WRITE_THRESHOLD: Final = 60  # Write to InfluxDB after this many seconds
-
-# InfluxDB write buffer (for failed writes)
-MAX_BUFFERED_WRITES: Final = 100  # Max points to buffer (FIFO, oldest dropped when full)
-MAX_RETRY_ATTEMPTS: Final = 20    # Max retry attempts per buffered point — raised from 3.
-                                   # 3 attempts meant a point was silently dropped within
-                                   # minutes of a sustained InfluxDB outage, long before the
-                                   # 100-point FIFO cap ever mattered. The FIFO cap above is
-                                   # now the real backstop; this just avoids retrying a
-                                   # genuinely corrupt point forever.
 
 # Price fallback — how often (seconds) to re-log a warning while the price
 # sensor stays unavailable/unknown, so a prolonged outage doesn't spam the log
 PRICE_FALLBACK_LOG_INTERVAL: Final = 300
 
 # Local timezone used for calendar-day/month boundaries (daily reset, monthly
-# rollover, InfluxDB query windows). Using UTC for these caused month rollover
-# to fire up to 2 hours late in summer (CEST = UTC+2), and would cause the
-# same issue for a new "daily" tracker if left on UTC.
+# rollover, statistics query windows). Using UTC for these caused month
+# rollover to fire up to 2 hours late in summer (CEST = UTC+2), and would
+# cause the same issue for the daily tracker if left on UTC.
 LOCAL_TIMEZONE: Final = "Europe/Copenhagen"
 
 # Sensor configuration for hub and user sensors
@@ -78,8 +81,12 @@ SENSOR_CONFIGS: Final = {
     "current_session_energy": ("current_session_energy", "mdi:lightning-bolt", SensorDeviceClass.ENERGY,    SensorStateClass.TOTAL,       "kWh", 3),
     "current_session_cost":   ("current_session_cost",   "mdi:currency-usd",   SensorDeviceClass.MONETARY,  SensorStateClass.TOTAL,       "DKK", 2),
 
-    # User sensors (per-user monthly statistics)
+    # User sensors (per-user monthly statistics) — all TOTAL_INCREASING so
+    # HA's recorder auto-detects the monthly reset and keeps long-term
+    # "sum"/"change" statistics correct across it. These are also the
+    # entities _async_sum_period_from_statistics() reads back from for both
+    # the monthly and daily totals, and for the history graph.
     "monthly_time":   ("monthly_time",   "mdi:clock-outline",  SensorDeviceClass.DURATION, SensorStateClass.TOTAL_INCREASING, "s",   0),
     "monthly_energy": ("monthly_energy", "mdi:lightning-bolt", SensorDeviceClass.ENERGY,   SensorStateClass.TOTAL_INCREASING, "kWh", 3),
-    "monthly_cost":   ("monthly_cost",   "mdi:currency-usd",   SensorDeviceClass.MONETARY, SensorStateClass.TOTAL,            "DKK", 2),
+    "monthly_cost":   ("monthly_cost",   "mdi:currency-usd",   SensorDeviceClass.MONETARY, SensorStateClass.TOTAL_INCREASING, "DKK", 2),
 }

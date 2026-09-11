@@ -1,8 +1,15 @@
 # File Name: system_health.py
-# Version: 2.12.1
+# Version: 2.13.0
 # Description: System health platform for PC User Statistics.
 #              Exposes integration state in Settings → System → Repairs → System Information.
-# Last Updated: June 26, 2026
+# Last Updated: September 10, 2026
+#
+# Changes in 2.13.0:
+#   FIX (crash): read cfg['host']/cfg['port'] with dict-subscript access —
+#        on a v2.17.0+ config entry (data={}, InfluxDB removed) this raised
+#        KeyError and broke the System Information panel entirely.
+#        can_reach_influxdb/influxdb_host/write_buffer removed — no more
+#        external DB to ping, no more write buffer to report.
 #
 # Changes in 2.12.1:
 #   FIX: coordinator lookup now uses entry.runtime_data instead of
@@ -11,15 +18,12 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components import system_health
 from homeassistant.core import HomeAssistant, callback
 
 from .const import DOMAIN, __version__
-
-_PING_PATH = "/ping"
 
 
 @callback
@@ -42,17 +46,15 @@ async def async_system_health_info(hass: HomeAssistant) -> dict[str, Any]:
     if coordinator is None:
         return {"error": "Integration not loaded"}
 
-    cfg = coordinator.config
-    influx_url = f"http://{cfg['host']}:{cfg['port']}{_PING_PATH}"
-
-    # Format last write time — only show time delta if an actual write has occurred.
-    # last_write_time is initialised to 0.0 at startup (not time.time()) so that
-    # "aldrig" is only shown when no write has happened, not from the epoch anchor.
+    # Format last update time — only show a time delta if a delta has
+    # actually been applied. last_write_time is initialised to 0.0 at
+    # startup (not time.time()) so that "aldrig" is only shown when nothing
+    # has happened yet, not from the epoch anchor.
     last_write = getattr(coordinator, "last_write_time", 0.0)
     now_ts = time.time()
 
     if last_write and last_write > 0 and (now_ts - last_write) < 86400:
-        # A real write has occurred within the last 24 h — show relative time
+        # An update has occurred within the last 24 h — show relative time
         delta = now_ts - last_write
         if delta < 60:
             last_write_str = f"{int(delta)}s siden"
@@ -61,7 +63,7 @@ async def async_system_health_info(hass: HomeAssistant) -> dict[str, Any]:
         else:
             last_write_str = f"{int(delta // 3600)}t {int((delta % 3600) // 60)}m siden"
     elif not coordinator.current_user:
-        # No active user — PC is idle, no writes expected
+        # No active user — PC is idle, no updates expected
         last_write_str = "ingen aktiv session"
     else:
         last_write_str = "aldrig"
@@ -70,16 +72,13 @@ async def async_system_health_info(hass: HomeAssistant) -> dict[str, Any]:
     if coordinator._monthly_loaded:
         monthly_str = "Indlæst ✓"
     else:
-        monthly_str = "Afventer InfluxDB..."
+        monthly_str = "Indlæser..."
 
     return {
         "version": __version__,
-        # async_check_can_reach_url shows a spinner in the UI until resolved
-        "can_reach_influxdb": system_health.async_check_can_reach_url(hass, influx_url),
-        "influxdb_host": f"{cfg['host']}:{cfg['port']}",
+        "data_source": "Home Assistant statistics",
         "monthly_data": monthly_str,
-        "write_buffer": f"{len(coordinator.failed_writes)}/100",
         "tracked_users": len(coordinator.tracked_users),
         "current_user": coordinator.current_user or "ingen",
-        "last_influxdb_write": last_write_str,
+        "last_update": last_write_str,
     }

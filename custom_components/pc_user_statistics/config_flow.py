@@ -1,130 +1,34 @@
 # File Name: config_flow.py
-# Version: 2.6.2
+# Version: 2.7.0
 # Description: Configuration flow and options flow for the PC User Statistics integration.
-# Last Updated: March 3, 2026
+# Last Updated: September 10, 2026
 #
-# Changes in 2.6.2:
-#   - Added reconfigure step (Gold quality scale requirement)
-#     Allows updating InfluxDB credentials without deleting the integration.
-#   - ConfigEntryAuthFailed raised on HTTP 401 during connection check.
+# Changes in 2.7.0:
+#   InfluxDB/VictoriaMetrics connection step removed (v2.17.0 — data now
+#   comes from HA's own recorder). async_check_influxdb_connection() and the
+#   host/port/database/username/password form deleted; async_step_user() is
+#   now a plain confirm-and-create step. async_step_reconfigure() removed —
+#   there is no longer any connection config to reconfigure. Existing config
+#   entries keep their old (now-unused) InfluxDB data keys harmlessly; they
+#   are simply never read again.
 
 import voluptuous as vol
 import logging
 from typing import Any
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
-import aiohttp
-import urllib.parse
 
 from .const import (
     DOMAIN,
-    DEFAULT_DATABASE,
     CONF_USER_MAPPINGS,
     CONF_TRACKED_USERS,
     DEFAULT_USER_MAP,
     DEFAULT_USERS,
 )
-from .helpers import validate_influxdb_config
 
 _LOGGER = logging.getLogger(__name__)
-
-
-async def async_check_influxdb_connection(
-    hass: HomeAssistant,
-    host: str,
-    port: int,
-    username: str,
-    password: str,
-    database: str,
-) -> tuple[bool, str]:
-    """Asynchronously check InfluxDB connection and database access.
-
-    Returns:
-        Tuple of (success, error_key)
-    """
-    is_valid, error_msg = validate_influxdb_config(host, port, database, username, password)
-    if not is_valid:
-        _LOGGER.error("Config validation failed: %s", error_msg)
-        return False, "invalid_config"
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Step 1: ping
-            try:
-                async with session.get(
-                    f"http://{host}:{port}/ping",
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as response:
-                    if response.status != 204:
-                        _LOGGER.error("InfluxDB ping failed: HTTP %s", response.status)
-                        return False, "cannot_connect"
-            except aiohttp.ClientError as err:
-                _LOGGER.error("InfluxDB ping failed: %s", err)
-                return False, "cannot_connect"
-
-            # Step 2: verify database exists
-            query = urllib.parse.urlencode({"q": "SHOW DATABASES"})
-            auth  = aiohttp.BasicAuth(username, password)
-
-            try:
-                async with session.get(
-                    f"http://{host}:{port}/query?{query}",
-                    auth=auth,
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as response:
-                    if response.status != 200:
-                        _LOGGER.error("InfluxDB query failed: HTTP %s", response.status)
-                        return False, "cannot_connect"
-
-                    data = await response.json()
-
-                    if (
-                        not isinstance(data, dict)
-                        or not data.get("results")
-                        or not isinstance(data["results"], list)
-                        or len(data["results"]) == 0
-                    ):
-                        _LOGGER.error("Invalid InfluxDB response structure: %s", data)
-                        return False, "cannot_connect"
-
-                    first_result = data["results"][0]
-                    if not first_result.get("series") or not isinstance(first_result["series"], list):
-                        _LOGGER.error("No series in InfluxDB response: %s", data)
-                        return False, "cannot_connect"
-
-                    first_series = first_result["series"][0]
-                    if not first_series.get("values") or not isinstance(first_series["values"], list):
-                        _LOGGER.error("No values in InfluxDB response: %s", data)
-                        return False, "cannot_connect"
-
-                    databases = [
-                        db[0]
-                        for db in first_series["values"]
-                        if isinstance(db, list) and len(db) > 0
-                    ]
-
-                    if not databases:
-                        _LOGGER.error("No databases found in InfluxDB")
-                        return False, "cannot_connect"
-
-                    if database not in databases:
-                        _LOGGER.error(
-                            "Database '%s' not found. Available: %s", database, databases
-                        )
-                        return False, "cannot_connect"
-
-                    _LOGGER.info("Successfully connected to InfluxDB database '%s'", database)
-                    return True, ""
-
-            except aiohttp.ClientError as err:
-                _LOGGER.error("InfluxDB database query failed: %s", err)
-                return False, "cannot_connect"
-
-    except Exception as err:
-        _LOGGER.exception("Unexpected error checking InfluxDB connection: %s", err)
-        return False, "unknown"
 
 
 # ── String helpers ────────────────────────────────────────────────────────────
@@ -199,89 +103,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step."""
-        errors: dict[str, str] = {}
+        """Handle the initial step.
 
-        if user_input is not None:
-            await self.async_set_unique_id(DOMAIN)
-            self._abort_if_unique_id_configured()
-
-            success, error_key = await async_check_influxdb_connection(
-                self.hass,
-                user_input["host"],
-                user_input["port"],
-                user_input["username"],
-                user_input["password"],
-                user_input["database"],
-            )
-
-            if success:
-                return self.async_create_entry(
-                    title="PC User Statistics",
-                    data=user_input,
-                )
-            else:
-                errors["base"] = error_key
-
-        data_schema = vol.Schema({
-            vol.Required("host",     default="a0d7b954-influxdb"): str,
-            vol.Required("port",     default=8086):                 int,
-            vol.Required("database", default=DEFAULT_DATABASE):     str,
-            vol.Required("username", default="homeassistant"):      str,
-            vol.Required("password"):                               str,
-        })
-
-        return self.async_show_form(
-            step_id="user",
-            data_schema=data_schema,
-            errors=errors,
-        )
-
-    async def async_step_reconfigure(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle reconfiguration — allows updating InfluxDB credentials.
-
-        Accessible via Settings → Devices & Services → PC User Statistics → ⋮ → Reconfigure.
-        Gold quality scale requirement.
+        No connection to configure anymore (v2.17.0) — just confirm and
+        create the entry. User mappings / tracked users are set afterwards
+        via the options flow (Settings → Devices & Services → PC User
+        Statistics → Configure).
         """
-        errors: dict[str, str] = {}
-        entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        await self.async_set_unique_id(DOMAIN)
+        self._abort_if_unique_id_configured()
 
         if user_input is not None:
-            success, error_key = await async_check_influxdb_connection(
-                self.hass,
-                user_input["host"],
-                user_input["port"],
-                user_input["username"],
-                user_input["password"],
-                user_input["database"],
-            )
+            return self.async_create_entry(title="PC User Statistics", data={})
 
-            if success:
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data=user_input,
-                    reason="reconfigure_successful",
-                )
-            else:
-                errors["base"] = error_key
-
-        # Pre-fill with current config
-        current = entry.data if entry else {}
-        data_schema = vol.Schema({
-            vol.Required("host",     default=current.get("host",     "a0d7b954-influxdb")): str,
-            vol.Required("port",     default=current.get("port",     8086)):                 int,
-            vol.Required("database", default=current.get("database", DEFAULT_DATABASE)):     str,
-            vol.Required("username", default=current.get("username", "homeassistant")):      str,
-            vol.Required("password"):                                                         str,
-        })
-
-        return self.async_show_form(
-            step_id="reconfigure",
-            data_schema=data_schema,
-            errors=errors,
-        )
+        return self.async_show_form(step_id="user")
 
 
 # ── Options flow ──────────────────────────────────────────────────────────────

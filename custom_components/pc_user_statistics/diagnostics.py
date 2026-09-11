@@ -1,8 +1,13 @@
 # File Name: diagnostics.py
-# Version: 2.12.1
+# Version: 2.13.0
 # Description: Diagnostics support for PC User Statistics integration.
 #              Allows users to download debug info from HA UI (Gold quality scale requirement).
-# Last Updated: June 26, 2026
+# Last Updated: September 10, 2026
+#
+# Changes in 2.13.0:
+#   host/port/database/username removed from config_entry diagnostics — a
+#   v2.17.0+ entry has none of these anymore (InfluxDB removed); they'd just
+#   report null forever. Not a crash (was .get()-based), just dead output.
 #
 # Changes in 2.12.1:
 #   FIX: coordinator lookup now uses entry.runtime_data instead of duck-typing
@@ -15,7 +20,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, __version__
+from .const import __version__
 
 
 async def async_get_config_entry_diagnostics(
@@ -52,11 +57,6 @@ async def async_get_config_entry_diagnostics(
             "title": entry.title,
             "state": entry.state.value,
             "source": entry.source,
-            "host": entry.data.get("host"),
-            "port": entry.data.get("port"),
-            "database": entry.data.get("database"),
-            "username": entry.data.get("username"),
-            # password intentionally omitted
         },
         "options": {
             "tracked_users": entry.options.get("tracked_users", []),

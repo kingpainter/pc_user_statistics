@@ -1,7 +1,43 @@
 # File Name: __init__.py
-# Version: 2.16.0
+# Version: 2.17.0
 # Description: Main setup and coordinator for the PC User Statistics integration.
-# Last Updated: July 17, 2026
+# Last Updated: September 10, 2026
+#
+# Changes in 2.17.0:
+#   BREAKING: InfluxDB/VictoriaMetrics dependency removed entirely — the
+#        add-on was deprecated in HA and no longer installable. Monthly/
+#        daily totals now come from Home Assistant's own recorder long-term
+#        statistics instead of an external TSDB:
+#          - _async_load_monthly_data() / _async_load_daily_data(): InfluxQL
+#            SUM query replaced by _async_sum_period_from_statistics(), which
+#            sums the recorder's hourly "change" statistic for the monthly_
+#            time/energy/cost entities over the query window. No more
+#            retry/backoff — this is a local DB read, not a network call to
+#            an add-on that might not be up yet.
+#          - _calculate_deltas() no longer writes anywhere. apply_delta()
+#            already ran unconditionally every poll before this change (only
+#            the InfluxDB write itself was WRITE_THRESHOLD-gated) — removing
+#            the write changes nothing about in-memory total accuracy. The
+#            monthly_*/daily sensors' own state updates are what HA's
+#            recorder observes to build the statistics read back above.
+#          - _async_write_to_influx/_write_point_to_influx/_escape_influx_tag,
+#            the failed-writes FIFO buffer, the retry/backoff machinery, the
+#            consecutive-failure repair issue, and _async_verify_influxdb are
+#            all deleted — no external write to retry or verify anymore.
+#          - async_add_manual_entry() applies a correction directly to the
+#            in-memory trackers instead of writing a tagged InfluxDB point.
+#            Known limitation: a correction dated in a PAST month/day no
+#            longer retroactively affects the history graph (see its
+#            docstring) — HA's own long-term statistics can't be backfilled
+#            for a bygone day the way a raw InfluxDB point could.
+#        const.py: monthly_cost changed state_class TOTAL → TOTAL_INCREASING
+#        to match monthly_time/monthly_energy (TOTAL needs an explicit
+#        last_reset to reset correctly, which was never set — switched so
+#        the same auto-reset-detection that already worked for the other two
+#        now covers cost as well). config_flow.py's connection step and
+#        helpers.validate_influxdb_config/parse_influxdb_response removed.
+#        websocket.py's _query_history (history graph) migrated the same way
+#        — see that file's changelog.
 #
 # Changes in 2.16.0:
 #   REFACTOR: self.monthly/self._pending and self.daily/self._daily_pending —
@@ -200,15 +236,15 @@ import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import aiohttp
-import urllib.parse
-
 from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers import entity_registry as er
+from homeassistant.components.recorder import get_instance
+from homeassistant.components.recorder.statistics import statistics_during_period
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -216,11 +252,7 @@ from .const import (
     WATT_ENTITY,
     DEVICE_POWER_ENTITY,
     PRICE_ENTITY,
-    MEASUREMENT,
     UPDATE_INTERVAL,
-    WRITE_THRESHOLD,
-    MAX_BUFFERED_WRITES,
-    MAX_RETRY_ATTEMPTS,
     PRICE_FALLBACK_LOG_INTERVAL,
     LOCAL_TIMEZONE,
     CONF_USER_MAPPINGS,
@@ -228,10 +260,17 @@ from .const import (
     DEFAULT_USER_MAP,
     DEFAULT_USERS,
 )
-from .helpers import safe_float_from_state, parse_influxdb_response
+from .helpers import safe_float_from_state
 from .store import NotificationStore
 from .notification_manager import NotificationManager
 from .period_tracker import PeriodTracker
+
+# Sensor keys (see const.SENSOR_CONFIGS) whose HA long-term statistics back
+# _async_sum_period_from_statistics() — both the monthly and daily totals,
+# and the history graph, read from these same three entities per user.
+_PERIOD_METRIC_SENSOR_KEYS: dict[str, str] = {
+    "time": "monthly_time", "energy": "monthly_energy", "cost": "monthly_cost",
+}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -286,17 +325,6 @@ def _assert_string_user_map(user_map: dict[str, str]) -> dict[str, str]:
     return {k: v for k, v in user_map.items() if isinstance(v, str)}
 
 
-def _escape_influx_tag(value: str) -> str:
-    """Escape special characters in InfluxDB line protocol tag values.
-
-    InfluxDB line protocol treats commas, spaces, and equals signs as
-    delimiters in tag key/value pairs. They must be backslash-escaped.
-    Without this, a user name like 'john doe' would silently corrupt the
-    line protocol and cause the write to fail or be misattributed.
-    """
-    return value.replace(",", r"\,").replace(" ", r"\ ").replace("=", r"\=")
-
-
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PC User Statistics from a config entry."""
     _LOGGER.info("Setting up PC User Statistics integration (entry: %s)", entry.entry_id)
@@ -305,12 +333,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator = PCStatisticsCoordinator(hass, entry)
         store = NotificationStore(hass)
 
-        # Verify InfluxDB connectivity and load persistent store in parallel.
-        # The two are completely independent — no reason to run them serially.
-        await asyncio.gather(
-            coordinator._async_verify_influxdb(),
-            store.async_load(),
-        )
+        # v2.17.0 — no more InfluxDB connectivity to verify; just load the
+        # persistent store.
+        await store.async_load()
 
         # v2.14.0 — wire up direct store reference and restore the monthly
         # baseline floor BEFORE _async_load_monthly_data() ever runs, so the
@@ -346,8 +371,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # timing dependency on hass.data population order.
         await coordinator._async_restore_session(store)
 
-        # Start periodic session flush — ensures session reaches disk every 60s
-        # regardless of InfluxDB availability.
+        # Start periodic session flush — ensures session reaches disk every 60s.
         coordinator._schedule_session_flush()
 
         # v2.14.0 — monthly data load is scheduled here (not in __init__) so it
@@ -440,17 +464,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.config_entry = config_entry
         self.config = config_entry.data
 
-        # ── Persistent HTTP session ────────────────────────────────────────
-        # One session reused for all InfluxDB writes and queries.
-        # Connector is closed explicitly in async_shutdown().
-        self._http_session: aiohttp.ClientSession = aiohttp.ClientSession(
-            auth=aiohttp.BasicAuth(
-                config_entry.data["username"],
-                config_entry.data["password"],
-            ),
-            timeout=aiohttp.ClientTimeout(total=5),
-        )
-
         # ── User configuration ─────────────────────────────────────────────
         raw_map = config_entry.options.get(CONF_USER_MAPPINGS, dict(DEFAULT_USER_MAP))
         self.user_map: dict[str, str] = _assert_string_user_map(_normalize_user_map(raw_map))
@@ -494,7 +507,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self.last_month: int = _now_local.month
         self.last_day = _now_local.date()
         # FIX v2.7.4: initialised to 0.0 (not time.time()) so system_health
-        # correctly shows "aldrig" until the first real InfluxDB write occurs.
+        # correctly shows "aldrig" until the first delta is actually applied.
+        # v2.17.0: no longer gates an InfluxDB write — just a "last update"
+        # timestamp for ws_get_system/ws_get_health, set on every applied delta.
         self.last_write_time: float = 0.0
 
         # ── Cached entity IDs — read once at init, not on every state lookup ──
@@ -503,19 +518,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self._device_entity: str = config_entry.data.get("device_power_entity",  DEVICE_POWER_ENTITY)
         self._price_entity: str  = config_entry.data.get("price_entity",         PRICE_ENTITY)
 
-        # Cache base URL — built once, reused for every InfluxDB request
-        self._influx_base_url: str = (
-            f"http://{config_entry.data['host']}:{config_entry.data['port']}"
-        )
-
-        # ── Write buffer for failed InfluxDB writes ────────────────────────
-        self.failed_writes: list[dict] = []
-
-        # Repair issue tracking — raised after consecutive InfluxDB write failures
-        self._consecutive_write_failures: int = 0
-        self._REPAIR_THRESHOLD: int = 5
-
-        # Guard: prevents background retry tasks from running after unload
+        # Guard: prevents background tasks from running after unload
         self._unloaded: bool = False
 
         # Idle tracking: set when user logs out, cleared when user logs in.
@@ -532,17 +535,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
         # Fix 7 — concurrent execution guard: DataUpdateCoordinator schedules
         # _async_update_data on a fixed interval. If a call takes longer than
-        # the interval (e.g. slow InfluxDB), a second call can start before the
-        # first finishes, causing double-writes. The lock prevents this.
+        # the interval (e.g. a slow statistics query), a second call can start
+        # before the first finishes. The lock prevents overlapping runs.
         self._update_lock: asyncio.Lock = asyncio.Lock()
-
-        # Fix 3 — retry backoff: after repeated poll failures, skip retrying
-        # for an exponentially increasing number of polls to avoid hammering
-        # an unreachable InfluxDB server every 60s.
-        # _retry_skip_count: how many polls to skip (doubles on each failure batch)
-        # _retry_skip_remaining: polls left to skip before trying again
-        self._retry_skip_count: int = 0
-        self._retry_skip_remaining: int = 0
 
         # ── Price fallback cache (v2.13.0) ──────────────────────────────────
         # _get_price() falls back to _last_valid_price instead of 0.0 when the
@@ -603,34 +598,6 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
     def _daily_loaded(self, value: bool) -> None:
         self._daily_tracker.loaded = value
 
-    async def _async_verify_influxdb(self) -> None:
-        """Ping InfluxDB to verify connectivity at setup time.
-
-        Raises ConfigEntryNotReady if unreachable (HA will retry).
-        Raises ConfigEntryAuthFailed if credentials are wrong (HA prompts re-auth).
-        """
-        try:
-            async with self._http_session.get(
-                f"{self._influx_base_url}/ping",
-                timeout=aiohttp.ClientTimeout(total=5),
-            ) as resp:
-                if resp.status == 401:
-                    raise ConfigEntryAuthFailed(
-                        "InfluxDB authentication failed — check username and password"
-                    )
-                if resp.status != 204:
-                    raise ConfigEntryNotReady(
-                        f"InfluxDB ping returned unexpected status {resp.status}"
-                    )
-        except ConfigEntryAuthFailed:
-            raise
-        except ConfigEntryNotReady:
-            raise
-        except aiohttp.ClientError as err:
-            raise ConfigEntryNotReady(
-                f"Cannot connect to InfluxDB at {self._influx_base_url}: {err}"
-            ) from err
-
     def _read_ms_screen_time(self, user: str) -> tuple[int | None, str | None]:
         """Read Microsoft Family Safety screen_time for a user from HA states.
 
@@ -655,8 +622,8 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             return None, None
 
     async def async_shutdown(self) -> None:
-        """Close the persistent HTTP session. Called on integration unload."""
-        self._unloaded = True  # Stop any pending background retry tasks
+        """Flush pending state to disk. Called on integration unload."""
+        self._unloaded = True  # Stop any pending background tasks
         # Cancel the periodic session flush timer so it does not fire after unload
         if self._session_flush_cancel is not None:
             self._session_flush_cancel()
@@ -696,16 +663,12 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                         "Shutdown: saved MS screen_time=%d min (%s) for gap-fill on next startup",
                         ms_min, ms_date,
                     )
-        if not self._http_session.closed:
-            await self._http_session.close()
-            _LOGGER.debug("InfluxDB HTTP session closed")
 
     def _schedule_session_flush(self) -> None:
-        """Schedule a periodic session flush every 60s, independent of InfluxDB.
+        """Schedule a periodic session flush every 60s.
 
-        This guarantees that session state reaches disk even when InfluxDB is
-        unavailable — fixing data loss across consecutive HA restarts where no
-        InfluxDB writes (and thus no session flushes) occur.
+        This guarantees that session state reaches disk on its own schedule,
+        independent of the coordinator's poll cycle.
 
         Fix 2 — liveness guard: if the previous flush is significantly overdue
         while a session is active, log a warning. A crashed/cancelled timer
@@ -788,67 +751,90 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         if not self._unloaded:
             self._schedule_session_flush()
 
-    # ── InfluxDB helpers ───────────────────────────────────────────────────
+    # ── Home Assistant native statistics helpers (v2.17.0) ──────────────────
+    # Replaces the old InfluxDB SUM query. HA's recorder already builds
+    # long-term statistics for the monthly_time/monthly_energy/monthly_cost
+    # entities (all state_class total_increasing as of v2.17.0 — monthly_cost
+    # was `total`, which needs an explicit last_reset to reset correctly at
+    # rollover; switched to total_increasing so the same auto-reset-detection
+    # that already worked for time/energy now covers cost too).
+    #
+    # "Daily" reuses the exact same three entities — restricting the query
+    # window to [today, now] gives today's own delta, exactly like
+    # restricting it to [month_start, now] gives the month's delta. No
+    # separate daily_* entities are needed.
+    #
+    # No retry/backoff needed anymore: this is a local recorder DB read, not
+    # a network call to an add-on that might not be up yet at HA startup.
 
-    async def _async_load_monthly_data(self, retry: int = 0) -> None:
-        """Query InfluxDB for initial monthly sums and merge into self.monthly.
+    def _entity_id_for(self, user: str, sensor_key: str) -> str | None:
+        """Resolve a tracked entity_id via the entity registry.
 
-        Retries up to 3 times with exponential backoff if InfluxDB is not yet
-        ready at HA startup (common when InfluxDB add-on starts after HA).
-
-        v2.14.0: the freshly-fetched InfluxDB sum is never allowed to result
-        in a LOWER total than self._persisted_monthly_baseline (loaded from
-        disk at startup, updated on every periodic flush). This protects
-        against silently erasing already-tracked time/energy/cost if InfluxDB
-        is missing recent writes at the exact moment a restart or integration
-        reload triggers this reload — which is exactly what was found to be
-        happening in production (see changelog).
+        Looks up by unique_id (same scheme sensor.py uses:
+        f"{entry_id}_{user}_{sensor_key}") rather than reconstructing the
+        has_entity_name-derived entity_id string, which isn't guaranteed
+        stable. Returns None only on a brand new install, before the sensor
+        platform has ever registered the entity.
         """
-        # v2.15.0 — month boundary computed from LOCAL midnight (Europe/
-        # Copenhagen), converted to UTC for the InfluxDB query. Using UTC
-        # midnight directly made the query window start up to 2 hours into
-        # the new local month during CEST.
-        now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
-        month_start_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        month_start = month_start_local.astimezone(timezone.utc).isoformat()
-
-        query = (
-            f'SELECT SUM("time_delta") AS "time", '
-            f'SUM("energy_delta") AS "energy", '
-            f'SUM("cost_delta") AS "cost" '
-            f'FROM {MEASUREMENT} '
-            f"WHERE time >= '{month_start}' "
-            f'GROUP BY "user"'
+        return er.async_get(self.hass).async_get_entity_id(
+            "sensor", DOMAIN, f"{self.config_entry.entry_id}_{user}_{sensor_key}"
         )
 
+    async def _async_sum_period_from_statistics(
+        self, period_start_local: datetime,
+    ) -> dict[str, dict[str, float]]:
+        """Sum each tracked user's time/energy/cost change since period_start_local.
+
+        1:1 replacement for the old `SELECT SUM(delta) WHERE time >= start`
+        InfluxDB query — sums the recorder's hourly "change" statistic (the
+        delta within that hour) for each user's monthly_time/monthly_energy/
+        monthly_cost entity, over every hour bucket from period_start_local
+        to now.
+        """
+        start = period_start_local.astimezone(timezone.utc)
+        end = dt_util.utcnow()
+        stats_engine = get_instance(self.hass)
+
+        raw: dict[str, dict[str, float]] = {
+            user: {"time": 0.0, "energy": 0.0, "cost": 0.0} for user in self.tracked_users
+        }
+        for user in self.tracked_users:
+            for key, sensor_key in _PERIOD_METRIC_SENSOR_KEYS.items():
+                entity_id = self._entity_id_for(user, sensor_key)
+                if entity_id is None:
+                    continue
+                stats = await stats_engine.async_add_executor_job(
+                    statistics_during_period,
+                    self.hass, start, end, {entity_id}, "hour", None, {"change"},
+                )
+                raw[user][key] = sum(
+                    (row.get("change") or 0.0) for row in stats.get(entity_id, [])
+                )
+        return raw
+
+    async def _async_load_monthly_data(self) -> None:
+        """Load this month's per-user totals from HA's own long-term statistics.
+
+        v2.14.0: the freshly-loaded sum is never allowed to result in a LOWER
+        total than self._persisted_monthly_baseline (loaded from disk at
+        startup, updated on every periodic flush). This protects against
+        silently erasing already-tracked time/energy/cost if the statistics
+        read is missing the very latest state changes at the exact moment a
+        restart or integration reload triggers this reload.
+        """
+        now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
+        month_start_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
         try:
-            query_params = urllib.parse.urlencode({"q": query, "db": self.config["database"]})
-            async with self._http_session.get(
-                f"{self._influx_base_url}/query?{query_params}"
-            ) as response:
-                if response.status != 200:
-                    raise aiohttp.ClientError(f"HTTP {response.status}")
-                data = await response.json()
-
-            field_mappings = {"time": 1, "energy": 2, "cost": 3}
-            parsed_data = parse_influxdb_response(data, field_mappings)
-
-            new_monthly_raw: dict[str, dict[str, float]] = {
-                user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-                for user in self.tracked_users
-            }
-            for user, values in parsed_data.items():
-                if user in new_monthly_raw:
-                    for key, val in values.items():
-                        new_monthly_raw[user][key] = float(val or 0)
+            new_monthly_raw = await self._async_sum_period_from_statistics(month_start_local)
 
             # v2.14.0 floor + pending-merge, v2.16.0 delegated to PeriodTracker:
-            # never let InfluxDB's sum show less than the last known-good
+            # never let the fresh sum show less than the last known-good
             # baseline, and fold in any deltas accumulated before load completed.
             baseline = self._persisted_monthly_baseline or {}
             self._monthly_tracker.load_from_influx(new_monthly_raw, baseline)
             _LOGGER.info(
-                "Monthly data loaded from InfluxDB: %s",
+                "Monthly data loaded from HA statistics: %s",
                 {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in self.monthly.items()},
             )
 
@@ -858,85 +844,36 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 self._store.save_monthly_baseline_in_memory(self.monthly)
                 await self._store.async_flush_monthly_baseline()
 
-        except aiohttp.ClientError as err:
-            max_retries = 3
-            if retry < max_retries:
-                delay = 30 * (2 ** retry)  # 30s, 60s, 120s
-                _LOGGER.warning(
-                    "InfluxDB not ready for monthly data load (attempt %d/%d), "
-                    "retrying in %ds: %s",
-                    retry + 1, max_retries, delay, err,
-                )
-                async def _retry():
-                    await asyncio.sleep(delay)
-                    if self._unloaded:
-                        _LOGGER.debug("Integration unloaded — aborting monthly data retry")
-                        return
-                    await self._async_load_monthly_data(retry=retry + 1)
-                self.hass.async_create_task(_retry())
-            else:
-                baseline = self._persisted_monthly_baseline or {}
-                _LOGGER.error(
-                    "Failed to load monthly data from InfluxDB after %d attempts: %s. "
-                    "Falling back to last known baseline instead of resetting to 0: %s",
-                    max_retries, err,
-                    {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in baseline.items()} or "none available",
-                )
-                self._monthly_tracker.load_fallback(baseline)
-
         except Exception as err:
-            _LOGGER.exception("Unexpected error loading monthly data: %s", err)
-            self._monthly_loaded = True
+            baseline = self._persisted_monthly_baseline or {}
+            _LOGGER.exception(
+                "Failed to load monthly data from HA statistics: %s. "
+                "Falling back to last known baseline instead of resetting to 0: %s",
+                err,
+                {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in baseline.items()} or "none available",
+            )
+            self._monthly_tracker.load_fallback(baseline)
 
-    async def _async_load_daily_data(self, retry: int = 0) -> None:
-        """Query InfluxDB for today's sums and merge into self.daily.
+    async def _async_load_daily_data(self) -> None:
+        """Load today's per-user totals — see _async_load_monthly_data().
 
-        Exact mirror of _async_load_monthly_data() — same retry/backoff
-        schedule, same baseline-floor protection via
-        self._persisted_daily_baseline, same fallback-to-baseline behaviour
-        if all retries fail. Window is local calendar "today" instead of
-        "this month".
+        Exact mirror of _async_load_monthly_data() — same baseline-floor
+        protection via self._persisted_daily_baseline, same fallback-to-
+        baseline behaviour on error. Window is local calendar "today" instead
+        of "this month".
         """
         now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
         day_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_start = day_start_local.astimezone(timezone.utc).isoformat()
-
-        query = (
-            f'SELECT SUM("time_delta") AS "time", '
-            f'SUM("energy_delta") AS "energy", '
-            f'SUM("cost_delta") AS "cost" '
-            f'FROM {MEASUREMENT} '
-            f"WHERE time >= '{day_start}' "
-            f'GROUP BY "user"'
-        )
 
         try:
-            query_params = urllib.parse.urlencode({"q": query, "db": self.config["database"]})
-            async with self._http_session.get(
-                f"{self._influx_base_url}/query?{query_params}"
-            ) as response:
-                if response.status != 200:
-                    raise aiohttp.ClientError(f"HTTP {response.status}")
-                data = await response.json()
-
-            field_mappings = {"time": 1, "energy": 2, "cost": 3}
-            parsed_data = parse_influxdb_response(data, field_mappings)
-
-            new_daily_raw: dict[str, dict[str, float]] = {
-                user: {"time": 0.0, "energy": 0.0, "cost": 0.0}
-                for user in self.tracked_users
-            }
-            for user, values in parsed_data.items():
-                if user in new_daily_raw:
-                    for key, val in values.items():
-                        new_daily_raw[user][key] = float(val or 0)
+            new_daily_raw = await self._async_sum_period_from_statistics(day_start_local)
 
             # v2.16.0 — floor + pending-merge delegated to PeriodTracker (see
             # _async_load_monthly_data for the equivalent monthly comment).
             baseline = self._persisted_daily_baseline or {}
             self._daily_tracker.load_from_influx(new_daily_raw, baseline)
             _LOGGER.info(
-                "Daily data loaded from InfluxDB: %s",
+                "Daily data loaded from HA statistics: %s",
                 {u: {k: round(v, 2) for k, v in vals.items()} for u, vals in self.daily.items()},
             )
 
@@ -944,34 +881,14 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 self._store.save_daily_baseline_in_memory(self.daily)
                 await self._store.async_flush_daily_baseline()
 
-        except aiohttp.ClientError as err:
-            max_retries = 3
-            if retry < max_retries:
-                delay = 30 * (2 ** retry)
-                _LOGGER.warning(
-                    "InfluxDB not ready for daily data load (attempt %d/%d), "
-                    "retrying in %ds: %s",
-                    retry + 1, max_retries, delay, err,
-                )
-                async def _retry():
-                    await asyncio.sleep(delay)
-                    if self._unloaded:
-                        _LOGGER.debug("Integration unloaded — aborting daily data retry")
-                        return
-                    await self._async_load_daily_data(retry=retry + 1)
-                self.hass.async_create_task(_retry())
-            else:
-                baseline = self._persisted_daily_baseline or {}
-                _LOGGER.error(
-                    "Failed to load daily data from InfluxDB after %d attempts: %s. "
-                    "Falling back to last known baseline instead of resetting to 0.",
-                    max_retries, err,
-                )
-                self._daily_tracker.load_fallback(baseline)
-
         except Exception as err:
-            _LOGGER.exception("Unexpected error loading daily data: %s", err)
-            self._daily_loaded = True
+            baseline = self._persisted_daily_baseline or {}
+            _LOGGER.exception(
+                "Failed to load daily data from HA statistics: %s. "
+                "Falling back to last known baseline instead of resetting to 0.",
+                err,
+            )
+            self._daily_tracker.load_fallback(baseline)
 
     async def _async_restore_session(self, store: "NotificationStore") -> None:
         """Restore in-progress session from persistent store after HA restart."""
@@ -1110,7 +1027,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
             current_day = _now_local.date()
             if current_month != self.last_month:
                 _LOGGER.info(
-                    "Month rolled over (%d → %d) — resetting monthly totals and reloading from InfluxDB",
+                    "Month rolled over (%d → %d) — resetting monthly totals and reloading from HA statistics",
                     self.last_month, current_month,
                 )
                 self._monthly_tracker.reset()
@@ -1128,7 +1045,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
             if current_day != self.last_day:
                 _LOGGER.info(
-                    "Day rolled over (%s → %s) — resetting daily totals and reloading from InfluxDB",
+                    "Day rolled over (%s → %s) — resetting daily totals and reloading from HA statistics",
                     self.last_day, current_day,
                 )
                 self._daily_tracker.reset()
@@ -1141,21 +1058,11 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 await self._async_load_daily_data()
                 self.last_day = current_day
 
-            if self.failed_writes:
-                if self._retry_skip_remaining > 0:
-                    self._retry_skip_remaining -= 1
-                    _LOGGER.debug(
-                        "Retry backoff active — skipping retry this poll (%d polls remaining)",
-                        self._retry_skip_remaining,
-                    )
-                else:
-                    await self._retry_failed_writes()
-
             if self._monthly_loaded:
                 await self._calculate_deltas(now)
                 self.last_time = now
             else:
-                _LOGGER.debug("Monthly data not yet loaded — skipping InfluxDB write this poll")
+                _LOGGER.debug("Monthly data not yet loaded — skipping delta apply this poll")
 
             try:
                 nm = self.hass.data.get(DOMAIN, {}).get("notification_manager")
@@ -1225,7 +1132,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
                 _LOGGER.info("User changed: %s → %s", self.current_user, new_user)
 
             if self.current_user and not same_user_relogin:
-                await self._calculate_deltas(now, force_write=True)
+                await self._calculate_deltas(now)
 
             self.current_user = new_user
             if new_user:
@@ -1259,8 +1166,17 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
 
     # ── Delta calculation ──────────────────────────────────────────────────
 
-    async def _calculate_deltas(self, now: float, force_write: bool = False) -> None:
-        """Accumulate time/energy/cost deltas and optionally write to InfluxDB."""
+    async def _calculate_deltas(self, now: float) -> None:
+        """Accumulate time/energy/cost deltas into the monthly/daily trackers.
+
+        v2.17.0: no longer writes anywhere. self.monthly/self.daily update
+        directly via apply_delta() below every poll — the monthly_*/daily
+        sensors' own state updates are what HA's recorder observes to build
+        the long-term statistics _async_sum_period_from_statistics() reads
+        back. There's no separate WRITE_THRESHOLD-gated commit step anymore;
+        apply_delta() already ran unconditionally on every poll before this
+        change too (only the now-removed InfluxDB write was threshold-gated).
+        """
         if not self.current_user:
             return
 
@@ -1290,11 +1206,9 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         self._monthly_tracker.apply_delta(self.current_user, delta_time, energy_delta, cost_delta)
         self._daily_tracker.apply_delta(self.current_user, delta_time, energy_delta, cost_delta)
 
-        time_since_write = now - self.last_write_time
-        if force_write or time_since_write >= WRITE_THRESHOLD:
-            await self._async_write_to_influx(current_power, delta_time, energy_delta, cost_delta)
-            self.last_write_time = now
-
+        # "last update" timestamp for ws_get_system/ws_get_health — no longer
+        # gates a write, just reports liveness.
+        self.last_write_time = now
         self.last_power = current_power
 
     # ── Sensor helpers ─────────────────────────────────────────────────────
@@ -1363,126 +1277,7 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         except (ValueError, TypeError):
             return False
 
-    # ── InfluxDB write ─────────────────────────────────────────────────────
-
-    async def _async_write_to_influx(
-        self,
-        power: float,
-        time_delta: float,
-        energy_delta: float,
-        cost_delta: float,
-    ) -> None:
-        """Build line-protocol point and write to InfluxDB. Buffers on failure."""
-        timestamp_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
-        escaped_user = _escape_influx_tag(self.current_user)
-        point = (
-            f"{MEASUREMENT},user={escaped_user} "
-            f"power={power},time_delta={time_delta},"
-            f"energy_delta={energy_delta},cost_delta={cost_delta} "
-            f"{timestamp_ns}"
-        )
-        # Read MS screen_time once — used on both success and failure paths
-        ms_min, ms_date = self._read_ms_screen_time(self.current_user)
-
-        success = await self._write_point_to_influx(point)
-        if success:
-            self._clear_repair_issue()
-            self._consecutive_write_failures = 0
-            _store = self.hass.data.get(DOMAIN, {}).get("store")
-            if _store:
-                _store.save_session_in_memory(
-                    self.current_user,
-                    self.acc_time,
-                    self.acc_energy,
-                    self.acc_cost,
-                    time.time(),
-                    ms_screen_time=ms_min,
-                    ms_screen_time_date=ms_date,
-                    last_valid_price=self._last_valid_price,
-                    last_valid_price_time=self._last_valid_price_time,
-                )
-                self.hass.async_create_task(_store.async_flush_session())
-        else:
-            self._consecutive_write_failures += 1
-            self._maybe_raise_repair_issue()
-            self._buffer_failed_write({"point": point, "timestamp": timestamp_ns, "attempts": 1})
-            _store = self.hass.data.get(DOMAIN, {}).get("store")
-            if _store:
-                _store.save_session_in_memory(
-                    self.current_user,
-                    self.acc_time,
-                    self.acc_energy,
-                    self.acc_cost,
-                    time.time(),
-                    ms_screen_time=ms_min,
-                    ms_screen_time_date=ms_date,
-                    last_valid_price=self._last_valid_price,
-                    last_valid_price_time=self._last_valid_price_time,
-                )
-                self.hass.async_create_task(_store.async_flush_session())
-
-    async def _write_point_to_influx(self, point: str) -> bool:
-        """Write a single line-protocol point. Returns True on success."""
-        try:
-            url = f"{self._influx_base_url}/write?db={self.config['database']}"
-            async with self._http_session.post(url, data=point) as response:
-                if response.status == 401:
-                    _LOGGER.error(
-                        "InfluxDB authentication failed (401) — "
-                        "update credentials via Settings → Devices & Services → PC User Statistics → Reconfigure"
-                    )
-                    raise ConfigEntryAuthFailed(
-                        "InfluxDB authentication failed — reconfigure credentials"
-                    )
-                if response.status != 204:
-                    _LOGGER.warning("InfluxDB write failed: HTTP %s", response.status)
-                    return False
-                _LOGGER.debug("InfluxDB write OK: %s", point)
-                return True
-        except ConfigEntryAuthFailed:
-            raise
-        except aiohttp.ClientError as err:
-            _LOGGER.warning("InfluxDB write error: %s", err)
-            return False
-        except Exception as err:
-            _LOGGER.exception("Unexpected InfluxDB write error: %s", err)
-            return False
-
-    def _maybe_raise_repair_issue(self) -> None:
-        """Raise a HA repair issue if consecutive write failures hit threshold."""
-        if self._consecutive_write_failures >= self._REPAIR_THRESHOLD:
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                "influxdb_unreachable",
-                is_fixable=False,
-                severity=ir.IssueSeverity.WARNING,
-                translation_key="influxdb_unreachable",
-            )
-            _LOGGER.warning(
-                "InfluxDB unreachable after %d consecutive failures — repair issue raised",
-                self._consecutive_write_failures,
-            )
-
-    def _clear_repair_issue(self) -> None:
-        """Clear the InfluxDB repair issue when writes succeed again."""
-        if self._consecutive_write_failures >= self._REPAIR_THRESHOLD:
-            ir.async_delete_issue(self.hass, DOMAIN, "influxdb_unreachable")
-            _LOGGER.info("InfluxDB write succeeded — repair issue cleared")
-
-    def _buffer_failed_write(self, write_data: dict) -> None:
-        """FIFO buffer for failed writes. Drops oldest when full."""
-        if len(self.failed_writes) >= MAX_BUFFERED_WRITES:
-            dropped = self.failed_writes.pop(0)
-            _LOGGER.warning(
-                "Write buffer full, dropped oldest point (ts=%s)",
-                dropped.get("timestamp"),
-            )
-        self.failed_writes.append(write_data)
-        _LOGGER.info(
-            "Buffered failed write (%d/%d)",
-            len(self.failed_writes), MAX_BUFFERED_WRITES,
-        )
+    # ── Manual corrections (v2.17.0 — no more InfluxDB write) ───────────────
 
     async def async_add_manual_entry(
         self,
@@ -1492,79 +1287,58 @@ class PCStatisticsCoordinator(DataUpdateCoordinator):
         energy_delta: float = 0.0,
         cost_delta: float = 0.0,
     ) -> bool:
-        """Write a manual time/energy/cost correction point to InfluxDB.
+        """Apply a manual time/energy/cost correction for a missed session.
 
         Used by ws_add_manual_entry for ad-hoc fixes when a session was lost
-        (e.g. files were overwritten mid-session, causing data loss). Tagged
-        source=manual so corrections remain distinguishable from normal
-        tracking points in InfluxDB.
+        (e.g. files were overwritten mid-session, causing data loss).
 
-        If the write succeeds and monthly data is already loaded, reload it
-        immediately so the correction is reflected in the panel without
-        waiting for the next poll or a full integration reload.
+        v2.17.0: applies the correction directly to the in-memory monthly/
+        daily trackers (via apply_delta, same as a normal poll) instead of
+        writing a tagged InfluxDB point and reloading. Known limitation vs.
+        the old InfluxDB-backed version: this only affects totals for the
+        period(s) the correction's date actually falls in — a correction
+        dated in a PAST calendar month/day is not retroactively reflected in
+        the history graph either, since HA's own long-term statistics are
+        derived from real sensor state history and can't be backfilled for a
+        bygone day the way a raw InfluxDB point could. The documented use
+        case (a session lost same-day/same-month) is unaffected.
         """
-        escaped_user = _escape_influx_tag(user)
-        point = (
-            f"{MEASUREMENT},user={escaped_user},source=manual "
-            f"power=0,time_delta={time_delta},"
-            f"energy_delta={energy_delta},cost_delta={cost_delta} "
-            f"{timestamp_ns}"
-        )
-        success = await self._write_point_to_influx(point)
-        if success:
-            _LOGGER.info(
-                "Manual correction written: user=%s time=+%.0fs energy=+%.4fkWh cost=+%.4fDKK",
-                user, time_delta, energy_delta, cost_delta,
-            )
-            if self._monthly_loaded:
-                await self._async_load_monthly_data()
-        return success
+        if user not in self.tracked_users:
+            return False
 
-    async def _retry_failed_writes(self) -> None:
-        """Retry buffered failed writes. Drops after max attempts.
+        correction_local = datetime.fromtimestamp(
+            timestamp_ns / 1_000_000_000, tz=timezone.utc
+        ).astimezone(ZoneInfo(LOCAL_TIMEZONE))
+        now_local = datetime.now(ZoneInfo(LOCAL_TIMEZONE))
 
-        Fix 3 — backoff: if all writes in a batch fail, we double the number
-        of polls to skip before the next retry attempt (2, 4, 8 … capped at 32).
-        A single success resets the backoff completely.
-        """
-        _LOGGER.info("Retrying %d buffered write(s)", len(self.failed_writes))
-        still_failing: list[dict] = []
-        any_success = False
-        all_failed = True
+        applied_to: list[str] = []
+        if (correction_local.year, correction_local.month) == (now_local.year, now_local.month):
+            self._monthly_tracker.apply_delta(user, time_delta, energy_delta, cost_delta)
+            applied_to.append("monthly")
+        if correction_local.date() == now_local.date():
+            self._daily_tracker.apply_delta(user, time_delta, energy_delta, cost_delta)
+            applied_to.append("daily")
 
-        for write_data in self.failed_writes:
-            if write_data["attempts"] >= MAX_RETRY_ATTEMPTS:
-                _LOGGER.error(
-                    "Max retries (%d) reached, dropping point (ts=%s)",
-                    MAX_RETRY_ATTEMPTS, write_data.get("timestamp"),
-                )
-                continue
-
-            write_data["attempts"] += 1
-            if await self._write_point_to_influx(write_data["point"]):
-                _LOGGER.info(
-                    "Retry succeeded (attempt %d/%d)",
-                    write_data["attempts"], MAX_RETRY_ATTEMPTS,
-                )
-                any_success = True
-                all_failed = False
-            else:
-                still_failing.append(write_data)
-
-        self.failed_writes = still_failing
-
-        if any_success:
-            # At least one write got through — reset backoff
-            self._retry_skip_count = 0
-            self._retry_skip_remaining = 0
-        elif still_failing and all_failed:
-            # Every write in this batch failed — back off exponentially
-            self._retry_skip_count = min(self._retry_skip_count * 2 if self._retry_skip_count else 2, 32)
-            self._retry_skip_remaining = self._retry_skip_count
+        if not applied_to:
             _LOGGER.warning(
-                "All retry writes failed — backing off for %d polls (~%d min)",
-                self._retry_skip_count, self._retry_skip_count,
+                "Manual entry for %s dated %s falls outside the current month — "
+                "not applied (HA long-term statistics can't be backfilled for a past day)",
+                user, correction_local.date(),
             )
+            return False
+
+        _LOGGER.info(
+            "Manual correction applied (%s): user=%s time=+%.0fs energy=+%.4fkWh cost=+%.4fDKK",
+            "+".join(applied_to), user, time_delta, energy_delta, cost_delta,
+        )
+        if self._store is not None:
+            if "monthly" in applied_to:
+                self._store.save_monthly_baseline_in_memory(self.monthly)
+                await self._store.async_flush_monthly_baseline()
+            if "daily" in applied_to:
+                self._store.save_daily_baseline_in_memory(self.daily)
+                await self._store.async_flush_daily_baseline()
+        return True
 
     # ── Data snapshot ──────────────────────────────────────────────────────
 
